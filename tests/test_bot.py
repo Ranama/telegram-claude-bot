@@ -134,7 +134,9 @@ class BotTest(unittest.TestCase):
             self.wait()
         finally:
             os.environ.pop("FAKE_SLEEP")
-        self.assertIn("Stopped after", self.api.last(CHAT_A))
+        msgs = [t for c, t in self.api.sent if c == CHAT_A]
+        self.assertIn("Stopping", msgs[-2])
+        self.assertIn("Stopped after", msgs[-1])
 
     def test_claude_failure_reported(self):
         self.say("/link personal")

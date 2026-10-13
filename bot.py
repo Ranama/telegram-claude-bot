@@ -427,10 +427,12 @@ class Bot:
             self.api.send(chat_id, "Nothing is running.")
             return
         job["stopped"] = True
+        # Announce first: on Windows the kill is synchronous, so the worker's
+        # "Stopped after …" message could otherwise arrive before this one.
+        self.api.send(chat_id, "🛑 Stopping…")
         proc = job.get("proc")
         if proc:
             kill_tree(proc)
-        self.api.send(chat_id, "🛑 Stopping…")
 
     # ----- jobs
 
