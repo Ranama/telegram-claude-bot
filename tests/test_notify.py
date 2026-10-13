@@ -105,6 +105,11 @@ class NotifyTest(unittest.TestCase):
         self.handle(self.stop_event())
         self.assertEqual(self.api.sent[0][0], 42)
 
+    def test_send_text_for_scripts(self):
+        self.assertEqual(notify.send_text("Backup finished", base=self.base,
+                                          api_factory=lambda token: self.api), 1)
+        self.assertEqual(self.api.sent, [(CHAT, "Backup finished")])
+
     def test_main_never_fails(self):
         with mock.patch.object(sys, "stdin", io.StringIO("not json")), \
                 mock.patch.object(notify, "HERE", self.base):

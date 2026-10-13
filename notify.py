@@ -36,13 +36,7 @@ def set_notify_enabled(base, enabled):
     (base / "notify.json").write_text(json.dumps({"enabled": bool(enabled)}), encoding="utf-8")
 
 
-def target_chats(cfg, state):
-    """Chats linked to an account; else the private chats of the approved users."""
-    chats = [int(c) for c, info in state.get("chats", {}).items() if info.get("account")]
-    if not chats:
-        chats = [int(u) for u in cfg.get("allowed_user_ids", [])]
-        chats += [int(u) for u in state.get("pinned_users", {}).values()]
-    return sorted(set(chats))
+target_chats = bot.target_chats
 
 
 def project_name(cwd):
@@ -110,7 +104,23 @@ def handle(event, base=HERE, api_factory=None):
     return sent
 
 
+def send_text(text, base=HERE, api_factory=None):
+    """Message your chat(s) right away: python notify.py --send "Backup finished" """
+    cfg = json.loads((base / "config.json").read_text(encoding="utf-8-sig"))
+    try:
+        state = json.loads((base / cfg.get("state_file", "state.json")).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        state = {}
+    api = (api_factory or (lambda t: bot.TelegramAPI(t, poll_timeout=5)))(cfg["telegram_bot_token"])
+    return sum(len(api.send(chat, text) or []) for chat in target_chats(cfg, state))
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--send":
+        text = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else sys.stdin.read()
+        sent = send_text(text.strip()) if text.strip() else 0
+        print(f"sent {sent} message(s)")
+        return 0 if sent else 1
     handler = logging.FileHandler(HERE / "notify.log", encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     log.addHandler(handler)

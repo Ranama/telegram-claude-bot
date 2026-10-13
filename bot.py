@@ -253,6 +253,20 @@ def hook_session_lookup(base, chat_id, message_id=None):
     return data.get(str(chat_id), {}).get(str(message_id))
 
 
+def target_chats(cfg, state):
+    """Chats linked to an account; else the private chats of the approved users."""
+    chats = [int(c) for c, info in state.get("chats", {}).items() if info.get("account")]
+    if not chats:
+        chats = [int(u) for u in cfg.get("allowed_user_ids", [])]
+        chats += [int(u) for u in state.get("pinned_users", {}).values()]
+    return sorted(set(chats))
+
+
+OUTBOX_DIR = "outbox"
+OUTBOX_SETTLE_SECONDS = 2   # let a file finish being written before sending it
+OUTBOX_MAX_TRIES = 5
+
+
 def account_env(acc):
     """Environment for running Claude Code as one configured account."""
     env = os.environ.copy()
@@ -433,6 +447,7 @@ class Bot:
         self.job_timeout = int(config.get("job_timeout_seconds", 3600))
         self.base_dir = Path(state.path).resolve().parent
         self.listings = {}  # chat_id -> the sessions shown by the last /list
+        self.outbox_tries = {}
         self.jobs = {}  # chat_id -> job dict
         self.jobs_lock = threading.Lock()
 
@@ -943,11 +958,56 @@ class Bot:
                 log.error("Account '%s': workdir does not exist: %s", name, workdir)
         return ok
 
+    def deliver_outbox(self, now=None):
+        """Send every text file in outbox/ to your chat(s), then delete it.
+
+        Lets anything on the PC (a script, a scheduled task, another Claude) message you:
+        write a UTF-8 .txt file into the outbox folder. Returns how many were sent."""
+        folder = self.base_dir / OUTBOX_DIR
+        if not folder.is_dir():
+            return 0
+        now = now or time.time()
+        sent = 0
+        files = sorted(folder.glob("*.txt"), key=lambda p: p.stat().st_mtime)
+        for path in files:
+            try:
+                if now - path.stat().st_mtime < OUTBOX_SETTLE_SECONDS:
+                    continue
+                text = path.read_text(encoding="utf-8-sig", errors="replace").strip()
+            except OSError:
+                continue
+            chats = target_chats(self.cfg, self.state.data)
+            ok = bool(text) and bool(chats) and all(self.api.send(c, text) != [] for c in chats)
+            if ok or not text:
+                try:
+                    path.unlink()
+                except OSError as e:
+                    log.warning("Could not remove %s: %s", path, e)
+                sent += 1 if ok else 0
+                log.info("outbox: %s %s", "sent" if ok else "skipped empty", path.name)
+                continue
+            tries = self.outbox_tries.get(path.name, 0) + 1
+            self.outbox_tries[path.name] = tries
+            if tries >= OUTBOX_MAX_TRIES:
+                path.replace(path.with_suffix(".failed"))
+                log.error("outbox: giving up on %s", path.name)
+        return sent
+
+    def _outbox_loop(self):
+        while True:
+            try:
+                self.deliver_outbox()
+            except Exception:
+                log.exception("outbox failed")
+            time.sleep(3)
+
     def run_forever(self):
         try:
             self.api.set_commands(BOT_COMMANDS)
         except Exception as e:
             log.warning("setMyCommands failed: %s", e)
+        (self.base_dir / OUTBOX_DIR).mkdir(exist_ok=True)
+        threading.Thread(target=self._outbox_loop, daemon=True).start()
         log.info("Bot running. Accounts: %s", ", ".join(self.accounts))
         offset = self.state.data.get("offset", 0)
         while True:

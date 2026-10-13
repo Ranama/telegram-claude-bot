@@ -374,6 +374,34 @@ class BotTest(unittest.TestCase):
         self.say("/notify on")
         self.assertIn("ON", self.api.last(CHAT_A))
 
+    def test_outbox_files_are_sent_then_removed(self):
+        self.say("/link work")  # links the chat, so it is a target
+        outbox = Path(self.tmp.name) / "outbox"
+        outbox.mkdir()
+        (outbox / "a.txt").write_text("✅ Backup finished", encoding="utf-8")
+        (outbox / "empty.txt").write_text("  ", encoding="utf-8")
+        (outbox / "ignored.json").write_text("{}", encoding="utf-8")
+        fresh = outbox / "fresh.txt"
+        fresh.write_text("still being written", encoding="utf-8")
+        now = time.time()
+        for f in ("a.txt", "empty.txt"):
+            os.utime(outbox / f, (now - 10, now - 10))
+        self.assertEqual(self.bot.deliver_outbox(now=now), 1)
+        self.assertEqual(self.api.last(CHAT_A), "✅ Backup finished")
+        self.assertEqual(sorted(p.name for p in outbox.iterdir()), ["fresh.txt", "ignored.json"])
+
+    def test_outbox_gives_up_after_failures(self):
+        self.say("/link work")
+        outbox = Path(self.tmp.name) / "outbox"
+        outbox.mkdir()
+        msg = outbox / "m.txt"
+        msg.write_text("hi", encoding="utf-8")
+        os.utime(msg, (time.time() - 10, time.time() - 10))
+        self.api.send = lambda chat, text: []  # Telegram unreachable
+        for _ in range(botmod.OUTBOX_MAX_TRIES):
+            self.bot.deliver_outbox()
+        self.assertTrue((outbox / "m.failed").exists())
+
     def test_long_message_split(self):
         chunks = botmod.split_message("x\n" * 5000)
         self.assertTrue(all(len(c) <= botmod.TG_LIMIT for c in chunks))

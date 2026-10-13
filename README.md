@@ -42,6 +42,11 @@ fix the failing test     ← goes to that session; you get Claude's answer back
 
 Note: a reply runs as a separate Claude Code process. If the desktop app still has that session open, it shows the new turns after you reopen the session.
 
+## Send yourself a message from anything on the PC
+
+- **Outbox:** drop a UTF-8 `.txt` file into the `outbox` folder next to `bot.py`. The running bot sends its text to your chat within a few seconds and deletes the file (after 5 failed tries it is renamed to `.failed`).
+- **From a script:** `python notify.py --send "Backup finished"` sends right away (no running bot needed).
+
 ## Quick start (macOS / Linux)
 
 ```bash
@@ -121,6 +126,7 @@ Per account:
 | `bot.py` | The bot |
 | `notify.py` | Claude Code hook: messages you when a PC session finishes or waits |
 | `sessions.py` | Finds and reads the Claude Code sessions stored on the PC |
+| `outbox/` | Text files put here are sent to you on Telegram |
 | `config.example.json` | Config template — `config.json` is created from it (git-ignored) |
 | `tests/` | Tests with a fake Telegram and a fake `claude` |
 
