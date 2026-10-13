@@ -19,14 +19,10 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: |
           set +e
-          python tests/test_bot.py > test-output.txt 2>&1
+          python -m unittest discover -s tests -v > test-output.txt 2>&1
           code=$?
-          python tests/test_setup.py >> test-output.txt 2>&1 || code=1
-          python tests/test_notify.py >> test-output.txt 2>&1 || code=1
-          python tests/test_sessions.py >> test-output.txt 2>&1 || code=1
           cat test-output.txt
           if [ $code -ne 0 ]; then
-            # Surface the failure as an annotation so it is visible without opening logs.
             msg=$(grep -E "^(FAIL|ERROR):|Error|assert|Traceback|File \"" test-output.txt | tail -25 | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')
             echo "::error title=Tests failed::$msg"
           fi

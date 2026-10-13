@@ -1,19 +1,9 @@
-# Secrets and runtime state - never commit
+# Your token and chat, and what the app writes while running
 config.json
-state.json
-state.tmp
-config.tmp
-bot.lock
-hook_sessions.json
-hook_sessions.tmp
-notify.json
+status/
 outbox/
-pending/
 *.log
-*.log.*
-
+bot.lock
+*.tmp
 __pycache__/
 *.pyc
-.venv/
-venv/
-.DS_Store
