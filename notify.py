@@ -101,11 +101,12 @@ def handle(event, base=HERE, api_factory=None):
             bot.hook_session_remember(base, chat_id, message_id, {
                 "session_id": event.get("session_id"),
                 "cwd": event.get("cwd"),
+                "transcript_path": event.get("transcript_path"),
                 "config_dir": os.environ.get("CLAUDE_CONFIG_DIR"),
             })
             sent += 1
-    log.info("%s %s -> %d message(s)", event.get("hook_event_name"),
-             event.get("notification_type") or "", sent)
+    log.info("%s %s -> %d message(s) (transcript: %s)", event.get("hook_event_name"),
+             event.get("notification_type") or "", sent, event.get("transcript_path"))
     return sent
 
 

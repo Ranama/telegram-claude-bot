@@ -17,6 +17,20 @@ Python 3.8+ standard library only — nothing to `pip install`.
 
 Keep the window open — closing it stops the bot. Next time, `start.bat` skips the steps that are already done and starts the bot straight away. Everything is logged to `setup.log` and `bot.log` in this folder (the token is never logged).
 
+## Work in your PC sessions from Telegram
+
+Every Claude Code session on the PC — started in the desktop app's Code tab, a terminal, or by this bot — can be continued from Telegram, without starting a new one:
+
+```
+/list            💻 sessions on the PC, newest first (🟢 = active right now)
+/enter 2         go into session 2 — shows Claude's last answer
+fix the failing test     ← goes to that session; you get Claude's answer back
+/history         the last messages of the session
+/leave           back to the bot's own chat
+```
+
+`/enter` also takes a session id (or its first characters). While you're in a session, `/continue` and `/status` apply to it, and `/new` leaves it. Claude runs in the session's own folder and Claude profile, with the bot's permission settings. If a session is 🟢 (busy on the PC right now), let it finish before you send something.
+
 ## Messages from your own Claude Code sessions
 
 `start.bat` asks once: *"Should Claude Code sessions you run on this PC message you on Telegram?"* If you say yes, it adds two [hooks](https://code.claude.com/docs/en/hooks) to your Claude Code settings (`~/.claude/settings.json`, with a backup next to it). From then on, every Claude Code session on the PC — the desktop app's Code tab or the terminal — messages you when it:
@@ -51,7 +65,10 @@ or set up `config.json` by hand (see below) and run `python3 bot.py config.json`
 | `/accounts` | List accounts |
 | `/new [text]` | Start a fresh session (optionally with a first prompt) |
 | `/continue [text]` | Continue the session ("Continue." by default) |
-| `/resume <session_id>` | Attach to an existing session, e.g. one started in your terminal |
+| `/list [n]` | Claude Code sessions on the PC, newest first |
+| `/enter <number or id>` | Go into a PC session; what you send goes to it (`/resume` does the same) |
+| `/history [n]` | Last messages of the session you're in |
+| `/leave` | Leave the PC session |
 | `/sessions` | Current and past sessions in this chat |
 | `/status` | Account, session, workdir, and what's running |
 | `/usage` | Runs, turns, cost, tokens, context fill % and models — for the session and the account |
@@ -103,12 +120,13 @@ Per account:
 | `setup_bot.py` | The setup steps (install/sign in Claude Code, bot token), then starts the bot |
 | `bot.py` | The bot |
 | `notify.py` | Claude Code hook: messages you when a PC session finishes or waits |
+| `sessions.py` | Finds and reads the Claude Code sessions stored on the PC |
 | `config.example.json` | Config template — `config.json` is created from it (git-ignored) |
 | `tests/` | Tests with a fake Telegram and a fake `claude` |
 
 ## Tests
 
-`python tests/test_bot.py`, `python tests/test_setup.py` and `python tests/test_notify.py` — run on Linux and Windows, Python 3.9+ (also in GitHub Actions on every push).
+`python tests/test_bot.py`, `test_setup.py`, `test_notify.py` and `test_sessions.py` — run on Linux and Windows, Python 3.9+ (also in GitHub Actions on every push).
 
 ## License
 

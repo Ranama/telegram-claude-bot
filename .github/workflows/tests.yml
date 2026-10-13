@@ -23,6 +23,7 @@ jobs:
           code=$?
           python tests/test_setup.py >> test-output.txt 2>&1 || code=1
           python tests/test_notify.py >> test-output.txt 2>&1 || code=1
+          python tests/test_sessions.py >> test-output.txt 2>&1 || code=1
           cat test-output.txt
           if [ $code -ne 0 ]; then
             # Surface the failure as an annotation so it is visible without opening logs.

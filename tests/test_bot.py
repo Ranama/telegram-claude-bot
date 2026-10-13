@@ -163,15 +163,111 @@ class BotTest(unittest.TestCase):
         self.assertIn("exited with code 2", self.api.last(CHAT_A))
         self.assertIn("simulated crash", self.api.last(CHAT_A))
 
-    def test_resume_and_state_persists(self):
+    def test_state_persists(self):
         self.say("/link work")
-        self.say("/resume abc-123")
         self.say("go on")
         self.wait()
-        self.assertIn("--resume abc-123", self.api.last(CHAT_A))
         reloaded = botmod.State(self.state_path)
         self.assertEqual(reloaded.chat(CHAT_A)["account"], "work")
         self.assertEqual(reloaded.account_stats("work")["runs"], 1)
+
+    # ---- Claude Code sessions on the PC: /list, /enter, /history, /leave
+
+    def make_transcript(self, profile, session_id, cwd, prompt, reply, title=None, age=0):
+        folder = Path(profile) / "projects" / ("p-" + session_id[:4])
+        folder.mkdir(parents=True, exist_ok=True)
+        lines = [
+            {"type": "user", "cwd": cwd, "sessionId": session_id,
+             "message": {"role": "user", "content": prompt}},
+            {"type": "user", "cwd": cwd, "isMeta": True,
+             "message": {"role": "user", "content": "<system-reminder>meta</system-reminder>"}},
+            {"type": "assistant", "cwd": cwd,
+             "message": {"role": "assistant", "content": [{"type": "tool_use", "name": "Read"}]}},
+            {"type": "user", "cwd": cwd, "message": {"role": "user", "content": [
+                {"type": "tool_result", "content": "file text"}]}},
+            {"type": "assistant", "cwd": cwd,
+             "message": {"role": "assistant", "content": [{"type": "text", "text": reply}]}},
+        ]
+        if title:
+            lines.append({"type": "ai-title", "aiTitle": title, "sessionId": session_id})
+        path = folder / f"{session_id}.jsonl"
+        path.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+        stamp = time.time() - age
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def pc_setup(self):
+        d = Path(self.tmp.name)
+        default_profile = d / "default-profile"
+        default_profile.mkdir()
+        self._env = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(default_profile)})
+        self._env.start()
+        self.addCleanup(self._env.stop)
+        self.make_transcript(self.cfg["accounts"]["work"]["config_dir"], "aaaa1111-0000",
+                             str(d / "wb"), "fix the login bug", "Fixed it: the token was expired.",
+                             title="Login bug fix", age=600)
+        self.make_transcript(default_profile, "bbbb2222-0000", str(d / "wa"),
+                             "write the README", "README written.", age=3600)
+
+    def test_list_enter_send_history_leave(self):
+        self.pc_setup()
+        d = Path(self.tmp.name)
+        self.say("/list")
+        listing = self.api.last(CHAT_A)
+        self.assertLess(listing.index("Login bug fix"), listing.index("write the README"))
+        self.assertIn("1. ", listing)
+        self.assertIn("you: fix the login bug", listing)
+
+        self.say("/enter 1")
+        entered = self.api.last(CHAT_A)
+        self.assertIn("You're in: wb — Login bug fix", entered)
+        self.assertIn("Fixed it: the token was expired.", entered)
+
+        self.say("now add a test for it")
+        self.wait()
+        done = self.api.last(CHAT_A)
+        self.assertIn("--resume aaaa1111-0000", done)
+        self.assertIn(f"cwd={d / 'wb'}", done)
+        self.assertIn("prof-b", done)              # the session's own Claude profile
+        self.assertNotIn("Reply to this message", done)
+
+        self.say("/history")
+        hist = self.api.last(CHAT_A)
+        self.assertIn("You: fix the login bug", hist)
+        self.assertIn("Claude: Fixed it", hist)
+        self.assertNotIn("file text", hist)        # tool results are left out
+        self.assertNotIn("system-reminder", hist)
+
+        self.say("/status")
+        self.assertIn("In PC session: wb", self.api.last(CHAT_A))
+        self.say("/leave")
+        self.assertIn("Left wb", self.api.last(CHAT_A))
+        self.say("/link personal")
+        self.say("hello")
+        self.wait()
+        self.assertIn("resumed=False", self.api.last(CHAT_A))
+
+    def test_enter_by_id_and_resume_alias_and_new_leaves(self):
+        self.pc_setup()
+        self.say("/enter bbbb")
+        self.assertIn("write the README", self.api.last(CHAT_A))  # untitled: first prompt
+        self.say("/resume aaaa1111")
+        self.assertIn("Login bug fix", self.api.last(CHAT_A))
+        self.say("/enter 99")
+        self.assertIn("No session '99'", self.api.last(CHAT_A))
+        self.say("/link work")
+        self.say("/new")
+        self.assertIsNone(self.bot.state.chat(CHAT_A).get("attached"))
+        self.assertTrue(any("Left the PC session" in t for _, t in self.api.sent))
+
+    def test_recent_session_warns_before_sending(self):
+        self.pc_setup()
+        self.make_transcript(self.cfg["accounts"]["work"]["config_dir"], "cccc3333-0000",
+                             str(Path(self.tmp.name) / "wb"), "long job", "working…", age=5)
+        self.say("/list")
+        self.assertIn("🟢", self.api.last(CHAT_A))
+        self.say("/enter 1")
+        self.assertIn("active on the PC a moment ago", self.api.last(CHAT_A))
 
     def test_single_account_autolinks(self):
         cfg = dict(self.cfg, accounts={"main": self.cfg["accounts"]["personal"]})

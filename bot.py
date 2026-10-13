@@ -24,6 +24,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import sessions as pc
+
 log = logging.getLogger("claude-tg")
 
 TG_LIMIT = 4000  # Telegram max is 4096 chars per message; leave headroom
@@ -33,11 +35,16 @@ HELP = """Claude ⇄ Telegram
 Just send a message → it goes to Claude, continuing the current session.
 (With a single account, chats are linked to it automatically.)
 
+Your Claude Code sessions on the PC (desktop app or terminal):
+/list – sessions on the PC, newest first
+/enter <number or id> – go into a session: what you send goes to it
+/history – the last messages of the session you're in
+/leave – back to this chat's own session
+
 /accounts – list Claude accounts
 /link <account> – link this chat to an account
 /new – start a fresh session (next message starts it)
 /continue [text] – continue the session ("Continue." if no text)
-/resume <session_id> – attach to an existing session (e.g. one from your terminal)
 /sessions – sessions known in this chat
 /status – what is running right now
 /usage – tokens, cost & turns for this session and account
@@ -50,11 +57,14 @@ When a Claude Code session on the PC (desktop app or terminal) finishes or waits
 for you, you get a message here: reply to it to continue that session."""
 
 BOT_COMMANDS = [
+    ("list", "Claude Code sessions on the PC"),
+    ("enter", "Go into a PC session: /enter 2"),
+    ("history", "Last messages of the session you're in"),
+    ("leave", "Leave the PC session"),
     ("accounts", "List Claude accounts"),
     ("link", "Link this chat to an account"),
     ("new", "Start a fresh session"),
     ("continue", "Continue the current session"),
-    ("resume", "Attach to an existing session id"),
     ("sessions", "Sessions in this chat"),
     ("status", "What is running"),
     ("usage", "Usage of current session"),
@@ -422,6 +432,7 @@ class Bot:
                            else [resolve_bin(claude_bin[0])] + list(claude_bin[1:]))
         self.job_timeout = int(config.get("job_timeout_seconds", 3600))
         self.base_dir = Path(state.path).resolve().parent
+        self.listings = {}  # chat_id -> the sessions shown by the last /list
         self.jobs = {}  # chat_id -> job dict
         self.jobs_lock = threading.Lock()
 
@@ -480,11 +491,17 @@ class Bot:
             if target and target.get("session_id"):
                 self.start_job(chat_id, text, external=target)
                 return
+        attached = self.state.chat(chat_id).get("attached")
+        if cmd is None and attached:
+            self.start_job(chat_id, text, external=attached)
+            return
 
         handlers = {
             "/start": self.cmd_help, "/help": self.cmd_help,
             "/accounts": self.cmd_accounts, "/link": self.cmd_link, "/use": self.cmd_link,
-            "/new": self.cmd_new, "/continue": self.cmd_continue, "/resume": self.cmd_resume,
+            "/new": self.cmd_new, "/continue": self.cmd_continue, "/resume": self.cmd_enter,
+            "/list": self.cmd_list, "/pc": self.cmd_list, "/enter": self.cmd_enter,
+            "/leave": self.cmd_leave, "/exit": self.cmd_leave, "/history": self.cmd_history,
             "/sessions": self.cmd_sessions, "/status": self.cmd_status,
             "/usage": self.cmd_usage, "/stop": self.cmd_stop,
             "/notify": self.cmd_notify, "/reply": self.cmd_reply,
@@ -538,6 +555,10 @@ class Bot:
         return None
 
     def cmd_new(self, chat_id, arg):
+        with self.state.lock:
+            left = self.state.chat(chat_id).pop("attached", None)
+        if left:
+            self.api.send(chat_id, f"⏏ Left the PC session {pc.folder_name(left.get('cwd'))}.")
         acc = self._account_or_warn(chat_id)
         if not acc:
             return
@@ -555,24 +576,96 @@ class Bot:
             self.api.send(chat_id, f"🆕 Fresh session on '{acc}'. Your next message starts it.")
 
     def cmd_continue(self, chat_id, arg):
-        self.start_job(chat_id, arg or "Continue.")
+        attached = self.state.chat(chat_id).get("attached")
+        self.start_job(chat_id, arg or "Continue.", external=attached)
 
-    def cmd_resume(self, chat_id, arg):
-        acc = self._account_or_warn(chat_id)
-        if not acc:
+    # ----- Claude Code sessions on the PC
+
+    def pc_sessions(self, limit):
+        profiles = [None] + [a["config_dir"] for a in self.accounts.values() if a.get("config_dir")]
+        known = _read_json(self.base_dir / HOOK_SESSIONS_FILE)
+        extra = [(e["transcript_path"], e.get("config_dir"))
+                 for chat in known.values() if isinstance(chat, dict)
+                 for e in chat.values() if isinstance(e, dict) and e.get("transcript_path")]
+        return pc.list_sessions(pc.profile_roots(profiles), limit=limit, extra_files=extra)
+
+    def cmd_list(self, chat_id, arg):
+        limit = min(int(arg), 50) if arg.isdigit() and int(arg) > 0 else 10
+        found = self.pc_sessions(limit)
+        self.listings[chat_id] = found
+        if not found:
+            self.api.send(chat_id, "No Claude Code sessions found on the PC yet.")
             return
+        lines = ["💻 Claude Code sessions on the PC (newest first):", ""]
+        lines += [pc.describe(i, info) for i, info in enumerate(found, 1)]
+        attached = self.state.chat(chat_id).get("attached")
+        lines += ["", "Go into one: /enter <number>   ·   more: /list 25"]
+        if attached:
+            lines.append(f"You're in: {pc.folder_name(attached.get('cwd'))} — {attached.get('title', '')}")
+        self.api.send(chat_id, "\n".join(lines))
+
+    def _find_session(self, chat_id, arg):
+        if arg.isdigit():
+            listing = self.listings.get(chat_id) or self.pc_sessions(max(10, int(arg)))
+            index = int(arg) - 1
+            return listing[index] if 0 <= index < len(listing) else None
+        if len(arg) >= 4:
+            for info in self.pc_sessions(500):
+                if info["session_id"].startswith(arg):
+                    return info
+        return None
+
+    def cmd_enter(self, chat_id, arg):
         if not arg:
-            self.api.send(chat_id, "Usage: /resume <session_id>")
+            self.api.send(chat_id, "Usage: /enter <number from /list>  (or a session id)")
             return
+        info = self._find_session(chat_id, arg)
+        if not info:
+            self.api.send(chat_id, f"No session '{arg}'. Send /list to see them.")
+            return
+        attached = {"session_id": info["session_id"], "cwd": info["cwd"],
+                    "config_dir": info.get("config_dir"), "title": info["title"],
+                    "transcript_path": info["path"], "attached": True}
         with self.state.lock:
-            s = self.state.session(chat_id, acc)
-            if s["session_id"] and s["session_id"] != arg:
-                s["history"].append({"session_id": s["session_id"], "stats": s["stats"],
-                                     "ended": int(time.time())})
-                s["stats"] = empty_stats()
-            s["session_id"] = arg
+            self.state.chat(chat_id)["attached"] = attached
             self.state.save()
-        self.api.send(chat_id, f"↪️ Attached to session {arg} on '{acc}'. Send a message to continue it.")
+        age = time.time() - info["mtime"]
+        last = (info.get("last_reply") or "").strip()
+        if len(last) > 1500:
+            last = "…" + last[-1500:]
+        lines = [f"▶ You're in: {pc.folder_name(info['cwd'])} — {info['title']}",
+                 f"Last active {pc.ago(age)} · session {info['session_id'][:8]}"]
+        if last:
+            lines += ["", "🤖 Last from Claude:", last]
+        lines += ["", "Everything you send now goes to this session.  /history · /leave"]
+        if age < pc.ACTIVE_SECONDS:
+            lines += ["", "⚠️ It was active on the PC a moment ago. If it's still working there, "
+                          "wait until it's done before you send something."]
+        self.api.send(chat_id, "\n".join(lines))
+
+    def cmd_leave(self, chat_id, arg):
+        with self.state.lock:
+            attached = self.state.chat(chat_id).pop("attached", None)
+            self.state.save()
+        if attached:
+            self.api.send(chat_id, f"⏏ Left {pc.folder_name(attached.get('cwd'))} — {attached.get('title', '')}. "
+                                   "Messages go to this chat's own session again.")
+        else:
+            self.api.send(chat_id, "You're not in a PC session. /list to see them.")
+
+    def cmd_history(self, chat_id, arg):
+        attached = self.state.chat(chat_id).get("attached")
+        if not attached:
+            self.api.send(chat_id, "You're not in a PC session. /list, then /enter <number>.")
+            return
+        path = attached.get("transcript_path")
+        info = pc.read_session(path, attached.get("config_dir")) if path and os.path.exists(path) else None
+        if not info:
+            self.api.send(chat_id, "Couldn't read that session's history.")
+            return
+        count = min(int(arg), 10) if arg.isdigit() and int(arg) > 0 else 3
+        self.api.send(chat_id, f"📜 {pc.folder_name(info['cwd'])} — {info['title']}\n\n"
+                      + pc.history_text(info, count))
 
     def cmd_sessions(self, chat_id, arg):
         c = self.state.chat(chat_id)
@@ -589,7 +682,11 @@ class Bot:
 
     def cmd_status(self, chat_id, arg):
         acc = self.state.chat(chat_id)["account"]
+        attached = self.state.chat(chat_id).get("attached")
         lines = [f"Account: {acc or '(none linked)'}"]
+        if attached:
+            lines.append(f"▶ In PC session: {pc.folder_name(attached.get('cwd'))} — "
+                         f"{attached.get('title', '')} ({attached['session_id'][:8]}) · /leave")
         if acc:
             s = self.state.session(chat_id, acc)
             lines.append(f"Session: {s['session_id'] or '(new on next message)'}")
@@ -687,7 +784,7 @@ class Bot:
                    "stopped": False, "external": external}
             self.jobs[chat_id] = job
         # Announce before starting, so a fast result can't arrive ahead of this message.
-        where = f"session in {Path(external['cwd']).name}" if external and external.get("cwd") else acc
+        where = f"session in {pc.folder_name(external['cwd'])}" if external and external.get("cwd") else acc
         self.api.send(chat_id, f"⏳ Working on it ({where})…")
         t = threading.Thread(target=self._run_job, args=(chat_id, job), daemon=True)
         job["thread"] = t
@@ -776,13 +873,21 @@ class Bot:
             else:
                 log.info("chat %s / %s: done in %s", chat_id, account, fmt_duration(elapsed))
             if external:
-                header += f" · {Path(cwd).name}"
-                body += "\n\n↩️ Reply to this message to continue this session."
+                header += f" · {pc.folder_name(cwd)}"
+                if not external.get("attached"):
+                    body += "\n\n↩️ Reply to this message to continue this session."
             ids = self.api.send(chat_id, f"{header}\n\n{body}") or []
             if external:
-                follow = dict(external, session_id=result.get("session_id") or session_id)
+                new_sid = result.get("session_id") or session_id
+                follow = {k: v for k, v in external.items() if k != "attached"}
+                follow["session_id"] = new_sid
                 for message_id in ids:
                     hook_session_remember(self.base_dir, chat_id, message_id, follow)
+                with self.state.lock:  # keep /enter pointing at the session if its id changed
+                    attached = self.state.chat(chat_id).get("attached")
+                    if attached and attached.get("session_id") == session_id and new_sid != session_id:
+                        attached["session_id"] = new_sid
+                        self.state.save()
         except Exception as e:
             log.exception("job failed")
             self.api.send(chat_id, f"❌ Bot error: {e}")
