@@ -50,6 +50,7 @@ Your Claude Code sessions on the PC (desktop app or terminal):
 /usage – tokens, cost & turns for this session and account
 /stop – stop the running job
 /notify on|off – messages from your own Claude Code sessions on the PC
+/away on|off – PC sessions wait for your answers here (permissions, questions)
 /reply <text> – answer the last session that messaged you
 /whoami – show your Telegram user id
 
@@ -70,6 +71,7 @@ BOT_COMMANDS = [
     ("usage", "Usage of current session"),
     ("stop", "Stop the running job"),
     ("notify", "Notifications from PC sessions on/off"),
+    ("away", "Answer PC sessions' questions here: on/off"),
     ("reply", "Answer the last PC session that messaged you"),
     ("whoami", "Show your Telegram user id"),
     ("help", "Help"),
@@ -253,6 +255,78 @@ def hook_session_lookup(base, chat_id, message_id=None):
     return data.get(str(chat_id), {}).get(str(message_id))
 
 
+def write_json(path, data):
+    """Write JSON atomically (readers never see half a file)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    for _ in range(20):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:  # Windows: reader has it open for a moment
+            time.sleep(0.05)
+    os.replace(tmp, path)
+
+
+# A Claude Code session that waits for your answer (permission or question) writes
+# pending/<id>.json; the bot writes your answer to pending/<id>.answer.json.
+PENDING_DIR = "pending"
+REQUEST_ID = re.compile(r"^[0-9a-f]{8}$")
+
+
+def pending_file(base, rid):
+    return Path(base) / PENDING_DIR / f"{rid}.json"
+
+
+def answer_file(base, rid):
+    return Path(base) / PENDING_DIR / f"{rid}.answer.json"
+
+
+def find_pending_message(base, chat_id, message_id):
+    """(request, question index) for a Telegram message of a waiting request."""
+    folder = Path(base) / PENDING_DIR
+    if folder.is_dir():
+        for path in folder.glob("*.json"):
+            if path.name.endswith(".answer.json"):
+                continue
+            req = _read_json(path)
+            ids = req.get("messages", {}).get(str(chat_id), [])
+            if message_id in ids:
+                return req, ids.index(message_id)
+    return None, None
+
+
+def permission_buttons(rid):
+    return [[{"text": "✅ Allow", "callback_data": f"p:{rid}:allow"},
+             {"text": "❌ Deny", "callback_data": f"p:{rid}:deny"}]]
+
+
+def question_buttons(rid, qi, question, selected=()):
+    rows = []
+    for oi, option in enumerate(question.get("options") or []):
+        mark = "✔ " if oi in selected else ""
+        rows.append([{"text": (mark + str(option.get("label", "?")))[:60],
+                      "callback_data": f"q:{rid}:{qi}:{oi}"}])
+    if question.get("multiSelect"):
+        rows.append([{"text": "✅ Done", "callback_data": f"q:{rid}:{qi}:done"}])
+    return rows
+
+
+def notify_settings(base):
+    """notify.json: {"enabled": messages from PC sessions, "away": answer their questions here}."""
+    data = _read_json(Path(base) / "notify.json")
+    return {"enabled": data.get("enabled", True), "away": data.get("away", False)}
+
+
+def update_notify_settings(base, **changes):
+    data = notify_settings(base)
+    data.update(changes)
+    write_json(Path(base) / "notify.json", data)
+    return data
+
+
 def target_chats(cfg, state):
     """Chats linked to an account; else the private chats of the approved users."""
     chats = [int(c) for c, info in state.get("chats", {}).items() if info.get("account")]
@@ -363,19 +437,39 @@ class TelegramAPI:
 
     def get_updates(self, offset):
         return self.call("getUpdates", offset=offset, timeout=self.poll_timeout,
-                         allowed_updates=["message"])
+                         allowed_updates=["message", "callback_query"])
 
-    def send(self, chat_id, text):
-        """Send text (split if long). Returns the ids of the messages sent."""
+    def send(self, chat_id, text, buttons=None):
+        """Send text (split if long; buttons go on the last part). Returns the message ids."""
         ids = []
-        for chunk in split_message(text):
+        chunks = split_message(text)
+        for i, chunk in enumerate(chunks):
+            params = {"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True}
+            if buttons and i == len(chunks) - 1:
+                params["reply_markup"] = {"inline_keyboard": buttons}
             try:
-                msg = self.call("sendMessage", chat_id=chat_id, text=chunk,
-                                disable_web_page_preview=True)
+                msg = self.call("sendMessage", **params)
                 ids.append(msg.get("message_id"))
             except Exception as e:  # never let a send failure kill a worker
                 log.error("sendMessage to %s failed: %s", chat_id, e)
         return ids
+
+    def edit(self, chat_id, message_id, text, buttons=None):
+        """Replace a message's text and buttons (no buttons = remove them)."""
+        try:
+            self.call("editMessageText", chat_id=chat_id, message_id=message_id,
+                      text=text[:4096], disable_web_page_preview=True,
+                      reply_markup={"inline_keyboard": buttons or []})
+            return True
+        except Exception as e:
+            log.warning("editMessageText failed: %s", e)
+            return False
+
+    def answer_callback(self, callback_id, text=""):
+        try:
+            self.call("answerCallbackQuery", callback_query_id=callback_id, text=text[:190])
+        except Exception as e:
+            log.warning("answerCallbackQuery failed: %s", e)
 
     def set_commands(self, commands):
         self.call("setMyCommands",
@@ -478,6 +572,9 @@ class Bot:
     # ----- dispatch
 
     def handle_update(self, update):
+        if update.get("callback_query"):
+            self.handle_callback(update["callback_query"])
+            return
         msg = update.get("message")
         if not msg or "text" not in msg:
             return
@@ -502,6 +599,10 @@ class Bot:
 
         reply_to = (msg.get("reply_to_message") or {}).get("message_id")
         if cmd is None and reply_to:
+            req, qi = find_pending_message(self.base_dir, chat_id, reply_to)
+            if req:
+                self.answer_with_text(chat_id, req, qi, text)
+                return
             target = hook_session_lookup(self.base_dir, chat_id, reply_to)
             if target and target.get("session_id"):
                 self.start_job(chat_id, text, external=target)
@@ -519,7 +620,7 @@ class Bot:
             "/leave": self.cmd_leave, "/exit": self.cmd_leave, "/history": self.cmd_history,
             "/sessions": self.cmd_sessions, "/status": self.cmd_status,
             "/usage": self.cmd_usage, "/stop": self.cmd_stop,
-            "/notify": self.cmd_notify, "/reply": self.cmd_reply,
+            "/notify": self.cmd_notify, "/reply": self.cmd_reply, "/away": self.cmd_away,
         }
         if cmd is None:
             self.start_job(chat_id, text)
@@ -596,13 +697,32 @@ class Bot:
 
     # ----- Claude Code sessions on the PC
 
-    def pc_sessions(self, limit):
+    def session_roots(self, refresh=False):
+        """[(projects folder, Claude profile)] to look for sessions in (cached a minute)."""
+        cached = getattr(self, "_roots_cache", None)
+        if cached and not refresh and time.time() - cached[0] < 60:
+            return cached[1]
         profiles = [None] + [a["config_dir"] for a in self.accounts.values() if a.get("config_dir")]
+        roots = pc.profile_roots(profiles)
+        known = {os.path.normcase(str(r)) for r, _ in roots}
+        for folder in pc.discover_project_folders():
+            if os.path.normcase(str(folder)) not in known:
+                roots.append((folder, str(folder.parent)))  # the app's own Claude profile
+        self._roots_cache = (time.time(), roots)
+        return roots
+
+    def pc_sessions(self, limit):
         known = _read_json(self.base_dir / HOOK_SESSIONS_FILE)
         extra = [(e["transcript_path"], e.get("config_dir"))
                  for chat in known.values() if isinstance(chat, dict)
                  for e in chat.values() if isinstance(e, dict) and e.get("transcript_path")]
-        return pc.list_sessions(pc.profile_roots(profiles), limit=limit, extra_files=extra)
+        return pc.list_sessions(self.session_roots(), limit=limit, extra_files=extra)
+
+    def log_session_folders(self):
+        for folder, profile in self.session_roots(refresh=True):
+            count = len(list(Path(folder).glob("*/*.jsonl"))) if Path(folder).is_dir() else 0
+            log.info("Session folder: %s (%d sessions)%s", folder, count,
+                     "" if profile is None else f" profile {profile}")
 
     def cmd_list(self, chat_id, arg):
         limit = min(int(arg), 50) if arg.isdigit() and int(arg) > 0 else 10
@@ -653,7 +773,10 @@ class Bot:
         if last:
             lines += ["", "🤖 Last from Claude:", last]
         lines += ["", "Everything you send now goes to this session.  /history · /leave"]
-        if age < pc.ACTIVE_SECONDS:
+        if not info.get("local", True):
+            lines[-1] = ("👀 View only: this session's folder isn't on this PC "
+                         f"({info.get('cwd')}), so it can't be continued from here.  /history · /leave")
+        elif age < pc.ACTIVE_SECONDS:
             lines += ["", "⚠️ It was active on the PC a moment ago. If it's still working there, "
                           "wait until it's done before you send something."]
         self.api.send(chat_id, "\n".join(lines))
@@ -736,12 +859,113 @@ class Bot:
         self.api.send(chat_id, msg)
 
     def cmd_notify(self, chat_id, arg):
-        path = self.base_dir / "notify.json"
         if arg.lower() in ("on", "off"):
-            path.write_text(json.dumps({"enabled": arg.lower() == "on"}), encoding="utf-8")
-        enabled = _read_json(path).get("enabled", True)
+            update_notify_settings(self.base_dir, enabled=arg.lower() == "on")
+        enabled = notify_settings(self.base_dir)["enabled"]
         self.api.send(chat_id, "🔔 Messages from your Claude Code sessions on the PC are "
                       + ("ON" if enabled else "OFF") + ". (/notify on or /notify off)")
+
+    def cmd_away(self, chat_id, arg):
+        if arg.lower() in ("on", "off"):
+            update_notify_settings(self.base_dir, away=arg.lower() == "on")
+        if notify_settings(self.base_dir)["away"]:
+            self.api.send(chat_id, "🏃 Away mode ON. When a Claude Code session on the PC needs "
+                          "permission or asks you something, it waits for your answer here "
+                          "(buttons). /away off when you're back at the PC.")
+        else:
+            self.api.send(chat_id, "🏠 Away mode OFF. Sessions on the PC ask you on the PC. "
+                          "(Tasks you start from Telegram always ask here.) /away on to change.")
+
+    # ----- answers to sessions that are waiting (permission requests, questions)
+
+    def handle_callback(self, cq):
+        callback_id = cq.get("id")
+        user = cq.get("from") or {}
+        msg = cq.get("message") or {}
+        chat_id = (msg.get("chat") or {}).get("id")
+        if not self.authorized(user.get("id"), chat_id, user.get("username")):
+            self.api.answer_callback(callback_id, "Not allowed.")
+            return
+        parts = (cq.get("data") or "").split(":")
+        rid = parts[1] if len(parts) > 1 else ""
+        req = _read_json(pending_file(self.base_dir, rid)) if REQUEST_ID.match(rid) else {}
+        if not req:
+            self.api.answer_callback(callback_id, "This question has expired.")
+            self.api.edit(chat_id, msg.get("message_id"), (msg.get("text") or "") + "\n\n⌛ Expired.")
+            return
+        answer = _read_json(answer_file(self.base_dir, rid))
+        if parts[0] == "p" and len(parts) == 3:
+            if answer.get("behavior"):
+                self.api.answer_callback(callback_id, "Already answered.")
+                return
+            allow = parts[2] == "allow"
+            write_json(answer_file(self.base_dir, rid), {
+                "behavior": "allow" if allow else "deny",
+                "message": "" if allow else "The user denied this from Telegram."})
+            self.api.edit(chat_id, msg.get("message_id"), (msg.get("text") or "")
+                          + ("\n\n✅ Allowed" if allow else "\n\n❌ Denied"))
+            self.api.answer_callback(callback_id, "Allowed" if allow else "Denied")
+            log.info("permission %s: %s", rid, "allow" if allow else "deny")
+        elif parts[0] == "q" and len(parts) == 4 and parts[2].isdigit():
+            self._answer_option(chat_id, msg, callback_id, req, answer, int(parts[2]), parts[3])
+        else:
+            self.api.answer_callback(callback_id)
+
+    def _answer_option(self, chat_id, msg, callback_id, req, answer, qi, choice):
+        questions = req.get("questions") or []
+        if qi >= len(questions):
+            self.api.answer_callback(callback_id)
+            return
+        q = questions[qi]
+        options = q.get("options") or []
+        answers = answer.setdefault("answers", {})
+        selected = answer.setdefault("selected", {}).setdefault(str(qi), [])
+        if q["question"] in answers:
+            self.api.answer_callback(callback_id, "Already answered.")
+            return
+        text = msg.get("text") or ""
+        if q.get("multiSelect") and choice != "done":
+            if not choice.isdigit() or int(choice) >= len(options):
+                return
+            oi = int(choice)
+            selected.remove(oi) if oi in selected else selected.append(oi)
+            write_json(answer_file(self.base_dir, req["rid"]), answer)
+            self.api.edit(chat_id, msg.get("message_id"), text,
+                          question_buttons(req["rid"], qi, q, selected))
+            self.api.answer_callback(callback_id)
+            return
+        if choice == "done":
+            if not selected:
+                self.api.answer_callback(callback_id, "Pick at least one first.")
+                return
+            value = [options[i]["label"] for i in sorted(selected)]
+            shown = ", ".join(value)
+        elif choice.isdigit() and int(choice) < len(options):
+            value = shown = options[int(choice)]["label"]
+        else:
+            self.api.answer_callback(callback_id)
+            return
+        answers[q["question"]] = value
+        write_json(answer_file(self.base_dir, req["rid"]), answer)
+        self.api.edit(chat_id, msg.get("message_id"), f"{text}\n\n✔️ You chose: {shown}")
+        self.api.answer_callback(callback_id, "Sent to Claude")
+        log.info("question %s/%s answered", req["rid"], qi)
+
+    def answer_with_text(self, chat_id, req, qi, text):
+        """A typed reply to a waiting request: own answer to a question, or deny + guidance."""
+        answer = _read_json(answer_file(self.base_dir, req["rid"]))
+        if req.get("kind") == "question":
+            q = (req.get("questions") or [{}])[qi or 0]
+            answer.setdefault("answers", {})[q.get("question", "")] = text
+            write_json(answer_file(self.base_dir, req["rid"]), answer)
+            self.api.send(chat_id, f"✔️ Sent your answer to Claude: {text}")
+        else:
+            if answer.get("behavior"):
+                self.api.send(chat_id, "That request was already answered.")
+                return
+            write_json(answer_file(self.base_dir, req["rid"]), {
+                "behavior": "deny", "message": f"The user replied from Telegram instead of allowing this: {text}"})
+            self.api.send(chat_id, "❌ Denied, and your message was passed to Claude.")
 
     def cmd_reply(self, chat_id, arg):
         target = hook_session_lookup(self.base_dir, chat_id)
@@ -839,7 +1063,11 @@ class Bot:
                 cmd, env, cwd = self.build_command(account, session_id)
             log.info("chat %s / %s: running %s", chat_id, account, cmd)
             if not os.path.isdir(cwd):
-                self.api.send(chat_id, f"❌ The workdir for '{account}' doesn't exist: {cwd}")
+                if external:
+                    self.api.send(chat_id, f"👀 This session's folder isn't on this PC ({cwd}), so it "
+                                           "can't be continued from here. /leave to go back.")
+                else:
+                    self.api.send(chat_id, f"❌ The workdir for '{account}' doesn't exist: {cwd}")
                 return
             try:
                 # Prompt goes over stdin so text starting with "-" is never read as a flag.
@@ -1092,6 +1320,10 @@ def start(cfg_path, cfg=None):
         state = State(state_file if state_file.is_absolute() else base / state_file)
         bot = Bot(cfg, api, state)
         bot.check_claude()
+        try:
+            bot.log_session_folders()
+        except Exception:
+            log.exception("could not list session folders")
         bot.run_forever()
     except KeyboardInterrupt:
         log.info("Stopped.")

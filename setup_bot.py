@@ -235,21 +235,25 @@ def load_or_create_config(path):
 
 NOTIFY_SCRIPT = HERE / "notify.py"
 NOTIFY_MATCHER = "permission_prompt|idle_prompt|agent_needs_input|elicitation_dialog"
-HOOK_EVENTS = ("Stop", "Notification")
+HOOK_EVENTS = ("Stop", "Notification", "PermissionRequest")
 
 
-def hook_handler(python=None, script=NOTIFY_SCRIPT, windows=None):
-    """The hook entry that runs notify.py (no console window on Windows)."""
+def hook_handler(python=None, script=NOTIFY_SCRIPT, windows=None, timeout=20):
+    """The hook entry that runs notify.py.
+
+    On Windows it runs through PowerShell with the console python.exe: PowerShell waits
+    for console programs and passes stdin/stdout through, which PermissionRequest needs
+    (pythonw.exe is a GUI program, so PowerShell would not wait for its answer)."""
     windows = bot.IS_WINDOWS if windows is None else windows
     python = Path(python or sys.executable)
     if windows:
-        pythonw = python.with_name("pythonw.exe")
-        exe = pythonw if pythonw.exists() else python
+        if python.name.lower() == "pythonw.exe":
+            python = python.with_name("python.exe")
         quote = lambda p: "'" + str(p).replace("'", "''") + "'"  # noqa: E731
-        return {"type": "command", "shell": "powershell", "timeout": 20,
-                "command": f"& {quote(exe)} {quote(script)}"}
+        return {"type": "command", "shell": "powershell", "timeout": timeout,
+                "command": f"& {quote(python)} {quote(script)}"}
     import shlex
-    return {"type": "command", "timeout": 20,
+    return {"type": "command", "timeout": timeout,
             "command": f"{shlex.quote(str(python))} {shlex.quote(str(script))}"}
 
 
@@ -284,7 +288,7 @@ def settings_files(accounts):
     return files
 
 
-def update_hooks(settings_path, handler=None):
+def update_hooks(settings_path, handler=None, permission_timeout=900):
     """Add (handler given) or remove (handler None) our hooks. Keeps other settings/hooks."""
     settings_path = Path(settings_path)
     settings = {}
@@ -304,6 +308,8 @@ def update_hooks(settings_path, handler=None):
             group = {"hooks": [handler]}
             if event == "Notification":
                 group = {"matcher": NOTIFY_MATCHER, "hooks": [handler]}
+            elif event == "PermissionRequest":  # waits for your tap: needs a long timeout
+                group = {"hooks": [dict(handler, timeout=permission_timeout)]}
             groups.append(group)
         if groups:
             hooks[event] = groups
@@ -328,15 +334,18 @@ def ensure_notifications(cfg, ask=None):
         cfg["notify_hooks"] = not answer.startswith("n")
     files = settings_files(cfg["accounts"])
     handler = hook_handler() if cfg["notify_hooks"] else None
+    wait = int(cfg.get("answer_timeout_seconds", 600))
     for path in files:
         try:
-            update_hooks(path, handler)
+            update_hooks(path, handler, permission_timeout=wait + 120)
         except (SetupError, OSError) as e:
             say(f"    Couldn't update {path}: {e}")
             continue
         log.info("hooks %s in %s", "installed" if handler else "removed", path)
     if handler:
         say("    On: finished or waiting sessions will message you. (/notify off to pause)")
+        say("    Tasks you start from Telegram ask for permissions there (buttons).")
+        say("    Send /away on in Telegram to answer your PC sessions' questions there too.")
         say("    Sessions that are already open pick this up after a restart of the app.")
     else:
         say("    Off. (Set \"notify_hooks\": true in config.json and run start.bat to turn on.)")

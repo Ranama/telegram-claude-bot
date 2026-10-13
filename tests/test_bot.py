@@ -19,9 +19,18 @@ ME, STRANGER, CHAT_A, CHAT_B = 111, 999, 5001, 5002
 class FakeAPI:
     def __init__(self):
         self.sent = []
+        self.edits = []
+        self.callbacks = []
 
-    def send(self, chat_id, text):
+    def send(self, chat_id, text, buttons=None):
         self.sent.append((chat_id, text))
+
+    def edit(self, chat_id, message_id, text, buttons=None):
+        self.edits.append((chat_id, message_id, text, buttons))
+        return True
+
+    def answer_callback(self, callback_id, text=""):
+        self.callbacks.append(text)
 
     def last(self, chat_id):
         msgs = [t for c, t in self.sent if c == chat_id]
@@ -401,6 +410,76 @@ class BotTest(unittest.TestCase):
         for _ in range(botmod.OUTBOX_MAX_TRIES):
             self.bot.deliver_outbox()
         self.assertTrue((outbox / "m.failed").exists())
+
+    # ---- answering waiting sessions with buttons
+
+    def pending(self, kind="permission", questions=None, rid="0a1b2c3d", message_id=50):
+        req = {"rid": rid, "kind": kind, "questions": questions or [],
+               "messages": {str(CHAT_A): [message_id + i for i in range(max(1, len(questions or [])))]}}
+        botmod.write_json(botmod.pending_file(Path(self.tmp.name), rid), req)
+        return rid
+
+    def tap(self, data, message_id=50, text="question text", user=ME):
+        self.uid += 1
+        self.bot.handle_update({"update_id": self.uid, "callback_query": {
+            "id": f"cb{self.uid}", "from": {"id": user}, "data": data,
+            "message": {"message_id": message_id, "chat": {"id": CHAT_A}, "text": text}}})
+
+    def answer(self, rid="0a1b2c3d"):
+        return botmod._read_json(botmod.answer_file(Path(self.tmp.name), rid))
+
+    def test_tap_allow_and_deny(self):
+        rid = self.pending()
+        self.tap(f"p:{rid}:allow", text="🔐 run npm test")
+        self.assertEqual(self.answer()["behavior"], "allow")
+        self.assertIn("✅ Allowed", self.api.edits[-1][2])
+        self.tap(f"p:{rid}:deny")
+        self.assertEqual(self.answer()["behavior"], "allow")        # first answer wins
+        self.assertEqual(self.api.callbacks[-1], "Already answered.")
+
+    def test_tap_single_and_multi_choice(self):
+        qs = [{"question": "Color?", "options": [{"label": "Red"}, {"label": "Blue"}]},
+              {"question": "Sizes?", "multiSelect": True,
+               "options": [{"label": "S"}, {"label": "M"}, {"label": "L"}]}]
+        rid = self.pending("question", qs)
+        self.tap(f"q:{rid}:0:1")
+        self.assertEqual(self.answer()["answers"], {"Color?": "Blue"})
+        self.assertIn("You chose: Blue", self.api.edits[-1][2])
+        self.tap(f"q:{rid}:1:done", message_id=51)
+        self.assertEqual(self.api.callbacks[-1], "Pick at least one first.")
+        self.tap(f"q:{rid}:1:0", message_id=51)
+        self.tap(f"q:{rid}:1:2", message_id=51)
+        marks = [b["text"] for row in self.api.edits[-1][3] for b in row]
+        self.assertEqual(marks, ["✔ S", "M", "✔ L", "✅ Done"])
+        self.tap(f"q:{rid}:1:done", message_id=51)
+        self.assertEqual(self.answer()["answers"]["Sizes?"], ["S", "L"])
+
+    def test_reply_text_answers_question_or_denies(self):
+        rid = self.pending("question", [{"question": "Name?", "options": [{"label": "A"}]}],
+                           rid="11112222", message_id=70)
+        self.say("Call it Vine", reply_to=70)
+        self.assertEqual(self.answer("11112222")["answers"], {"Name?": "Call it Vine"})
+        self.pending(rid="33334444", message_id=80)
+        self.say("no, use pytest", reply_to=80)
+        a = self.answer("33334444")
+        self.assertEqual(a["behavior"], "deny")
+        self.assertIn("no, use pytest", a["message"])
+
+    def test_expired_or_foreign_taps(self):
+        self.tap("p:deadbeef:allow")
+        self.assertEqual(self.api.callbacks[-1], "This question has expired.")
+        rid = self.pending()
+        self.tap(f"p:{rid}:allow", user=STRANGER)
+        self.assertEqual(self.api.callbacks[-1], "Not allowed.")
+        self.assertEqual(self.answer(), {})
+
+    def test_away_mode_keeps_notify_setting(self):
+        self.say("/notify off")
+        self.say("/away on")
+        self.assertIn("Away mode ON", self.api.last(CHAT_A))
+        self.assertEqual(botmod.notify_settings(Path(self.tmp.name)), {"enabled": False, "away": True})
+        self.say("/away off")
+        self.assertIn("Away mode OFF", self.api.last(CHAT_A))
 
     def test_long_message_split(self):
         chunks = botmod.split_message("x\n" * 5000)

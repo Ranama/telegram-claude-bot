@@ -85,7 +85,7 @@ def _read_lines(path):
 def read_session(path, config_dir=None):
     """Summary of one transcript file, or None if it holds no conversation."""
     path = Path(path)
-    info = {"session_id": path.stem, "path": str(path), "config_dir": config_dir,
+    info = {"session_id": path.stem, "path": str(path), "config_dir": config_dir, "local": True,
             "mtime": path.stat().st_mtime, "cwd": None, "title": None, "first_prompt": None,
             "last_prompt": None, "turns": []}
     titles = {}
@@ -122,6 +122,7 @@ def read_session(path, config_dir=None):
     info["title"] = (titles.get("custom") or titles.get("ai") or titles.get("summary")
                      or _one_line(info["first_prompt"] or "", 60))
     info["last_reply"] = next((t for r, t in reversed(turns) if r == "claude"), "")
+    info["local"] = bool(info["cwd"]) and os.path.isdir(info["cwd"])  # can be continued here
     del turns[:-20]
     return info
 
@@ -129,6 +130,49 @@ def read_session(path, config_dir=None):
 def _one_line(text, limit):
     text = " ".join(str(text).split())
     return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+# Big folders inside the Claude app's data folder that never hold session transcripts.
+SKIP_DIRS = {"Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache",
+             "DawnWebGPUCache", "GrShaderCache", "ShaderCache", "blob_storage", "IndexedDB",
+             "Local Storage", "Session Storage", "Service Worker", "WebStorage", "Crashpad",
+             "Network", "Partitions", "Shared Dictionary", "logs", "node_modules", "vm_bundles",
+             "Dictionaries", "sentry", ".git", "debug", "shell-snapshots", "todos",
+             "file-history", "statsig", "plugins", "ide"}
+APP_DATA_DIRS = ("Claude", "AnthropicClaude", "Claude-3p")
+
+
+def app_data_bases():
+    """Folders where the Claude desktop app keeps its data on this PC."""
+    bases = []
+    for env in ("APPDATA", "LOCALAPPDATA"):
+        if os.environ.get(env):
+            bases += [Path(os.environ[env]) / name for name in APP_DATA_DIRS]
+    bases.append(Path.home() / "Library" / "Application Support" / "Claude")  # macOS
+    bases.append(Path.home() / ".config" / "Claude")                          # Linux
+    return [b for b in bases if b.is_dir()]
+
+
+def discover_project_folders(bases=None, max_depth=7, max_dirs=6000):
+    """Every '<profile>/projects' folder holding Claude Code transcripts under the
+    Claude app's data folders (where the desktop app may keep its own sessions)."""
+    found, visited = [], 0
+    for base in (app_data_bases() if bases is None else bases):
+        stack = [(Path(base), 0)]
+        while stack and visited < max_dirs:
+            folder, depth = stack.pop()
+            visited += 1
+            try:
+                entries = [e for e in os.scandir(folder) if e.is_dir(follow_symlinks=False)]
+            except OSError:
+                continue
+            for entry in entries:
+                path = Path(entry.path)
+                if entry.name == "projects" and next(path.glob("*/*.jsonl"), None):
+                    found.append(path)
+                elif entry.name not in SKIP_DIRS and depth < max_depth:
+                    stack.append((path, depth + 1))
+    return found
 
 
 def profile_roots(profiles):
@@ -183,6 +227,8 @@ def describe(index, info, now=None):
     age = now - info["mtime"]
     dot = "🟢" if age < ACTIVE_SECONDS else "▫️"
     line = f"{index}. {dot} {folder_name(info['cwd'])} — {_one_line(info['title'], 60)} · {ago(age)}"
+    if not info.get("local", True):
+        line += " · view only"
     if info.get("last_prompt"):
         line += f"\n    you: {_one_line(info['last_prompt'], 70)}"
     return line

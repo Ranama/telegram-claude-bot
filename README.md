@@ -29,13 +29,27 @@ fix the failing test     ← goes to that session; you get Claude's answer back
 /leave           back to the bot's own chat
 ```
 
-`/enter` also takes a session id (or its first characters). While you're in a session, `/continue` and `/status` apply to it, and `/new` leaves it. Claude runs in the session's own folder and Claude profile, with the bot's permission settings. If a session is 🟢 (busy on the PC right now), let it finish before you send something.
+Sessions are looked up in `~/.claude/projects` (and every account's profile) and in the Claude desktop app's own data folders; the folders found are listed in `bot.log` at startup. Sessions whose folder isn't on this PC (for example from the app's sandbox) are shown as *view only*. `/enter` also takes a session id (or its first characters). While you're in a session, `/continue` and `/status` apply to it, and `/new` leaves it. Claude runs in the session's own folder and Claude profile, with the bot's permission settings. If a session is 🟢 (busy on the PC right now), let it finish before you send something.
+
+## Answer Claude from Telegram (buttons)
+
+When Claude needs **permission** for something (run a command, edit a file) or asks you a **multiple-choice question**, you can answer in Telegram:
+
+- 🔐 *Claude wants to run a command: `npm test`* → **✅ Allow** / **❌ Deny** — or reply with text to deny and tell Claude what to do instead.
+- ❓ *Which database should I use?* → one button per option (multi-choice: tick several, then **✅ Done**) — or reply with your own answer.
+
+The session waits, checking every second, until you answer (default up to 10 minutes, `answer_timeout_seconds` in `config.json`); after that it asks on the PC as usual.
+
+- **Tasks you start from Telegram** always ask you here.
+- **Sessions on the PC** (desktop app, terminal) ask on the PC — until you send **`/away on`**; then they ask you here too. Send `/away off` when you're back.
+
+This uses Claude Code's `PermissionRequest` hook, installed together with the notification hooks below.
 
 ## Messages from your own Claude Code sessions
 
 `start.bat` asks once: *"Should Claude Code sessions you run on this PC message you on Telegram?"* If you say yes, it adds two [hooks](https://code.claude.com/docs/en/hooks) to your Claude Code settings (`~/.claude/settings.json`, with a backup next to it). From then on, every Claude Code session on the PC — the desktop app's Code tab or the terminal — messages you when it:
 
-- **finishes** (✅ with Claude's last message), or
+- **finishes** (✅ with Claude's full answer — long ones are split over several messages), or
 - **waits for you** (❓ waiting for your input, 🔐 needs permission — approve that one on the PC).
 
 **Reply to the message** in Telegram and the bot continues that session with your answer (in the session's own folder and Claude profile); reply to the bot's answer to keep going. `/reply <text>` answers the most recent one. `/notify off` / `/notify on` pauses and resumes these messages; `python setup_bot.py --remove-hooks` removes the hooks. Sessions that are already open pick the hooks up after you restart them.
@@ -79,6 +93,7 @@ or set up `config.json` by hand (see below) and run `python3 bot.py config.json`
 | `/usage` | Runs, turns, cost, tokens, context fill % and models — for the session and the account |
 | `/stop` | Stop the running job |
 | `/notify on\|off` | Messages from your own Claude Code sessions on the PC |
+| `/away on\|off` | PC sessions ask you here (buttons) for permissions and questions |
 | `/reply <text>` | Answer the latest PC session that messaged you (or just reply to its message) |
 | `/whoami` | Show your Telegram user id (works for anyone) |
 

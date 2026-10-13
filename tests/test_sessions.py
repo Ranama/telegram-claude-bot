@@ -80,6 +80,24 @@ class SessionsTest(unittest.TestCase):
         self.assertEqual(info["first_prompt"], "first prompt")
         self.assertEqual(info["last_reply"], "latest reply")
 
+    def test_discovers_app_session_folders_and_skips_caches(self):
+        app = Path(self.tmp.name) / "AppData" / "Claude"
+        inside = write(app / "local-agent-mode-sessions" / "abc" / ".claude" / "projects" / "p" / "s.jsonl",
+                       [user("hi"), claude("hello")])
+        write(app / "Cache" / "x" / "projects" / "p" / "c.jsonl", [user("no"), claude("no")])
+        (app / "projects" / "empty").mkdir(parents=True)   # no transcripts: not a session folder
+        found = pc.discover_project_folders([app])
+        self.assertEqual(found, [inside.parent.parent])
+
+    def test_sessions_from_elsewhere_are_view_only(self):
+        info = pc.read_session(write(self.root / "p" / "vm.jsonl", [
+            {"type": "user", "cwd": "/sessions/vm-only/x", "message": {"content": "hi"}}, claude("ok")]))
+        self.assertFalse(info["local"])
+        self.assertIn("view only", pc.describe(1, info))
+        here = pc.read_session(write(self.root / "p" / "here.jsonl", [
+            {"type": "user", "cwd": self.tmp.name, "message": {"content": "hi"}}, claude("ok")]))
+        self.assertTrue(here["local"])
+
     def test_describe_and_history(self):
         info = pc.read_session(write(self.root / "p" / "s.jsonl", [
             user("one"), claude("a"), user("two"), claude("b"), user("three"), claude("c")]))

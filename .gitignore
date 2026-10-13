@@ -8,6 +8,7 @@ hook_sessions.json
 hook_sessions.tmp
 notify.json
 outbox/
+pending/
 *.log
 *.log.*
 
