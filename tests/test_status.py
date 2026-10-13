@@ -86,12 +86,56 @@ class StatusTest(TempDirTest):
                                            transcript_path=""), now=t - 3 * 86400)
         items = status.current(self.dir, now=t + 5)
         self.assertEqual([i["state"] for i in items], ["working", "completed"])   # old one hidden
+        text = status.status_text(items, now=t)
+        self.assertTrue(text.startswith("📋 <b>Claude sessions</b>\n👤 jeppe@example.com\n"
+                                        "🟡 1 working · 🟢 1 done\n"), text)
+        self.assertIn("🟡 <b>Deploy</b>\nWorking on it…\n<i>📁 shop · just now</i>", text)
+        self.assertIn("🟢 <b>Login bug fix</b>\nDone: All done here.\n<i>📁 VineTrip · just now</i>", text)
+        self.assertIn("🕒 Updated ", text)
+        self.assertIn("No sessions in the last 24 hours.", status.status_text([]))
+
+    def test_status_text_colours_wording_and_escaping(self):
+        def item(state, **extra):
+            return dict({"state": state, "title": "T", "prompt": "", "detail": "", "summary": "",
+                         "project": "P", "account": "a@x.com", "ago": "just now"}, **extra)
+        items = [item("needs_input", detail="Claude asks: Which DB? (Postgres, SQLite)"),
+                 item("needs_approval", detail="Claude wants to run: npm test && deploy"),
+                 item("needs_approval", detail="Claude wants you to approve its plan"),
+                 item("working", title="Fix <login>", prompt="can you please add tests for login.py?"),
+                 item("stalled"), item("completed", summary="Done. I fixed it.", account="b@x.com"),
+                 item("ended")]
         text = status.status_text(items)
-        self.assertIn("📋 Claude sessions — 🟡 1  ✅ 1", text)
-        self.assertIn("✅ Completed — VineTrip · “Login bug fix”", text)
-        self.assertIn("👤 jeppe@example.com", text)
-        self.assertIn("All done here.", text)
-        self.assertEqual(status.status_text([]), "📋 No Claude Code sessions in the last 24 hours.")
+        self.assertIn("🔴 3 need you · 🟡 1 working · 🟠 1 inactive · 🟢 1 done · ⚪ 1 closed", text)
+        for line in ["🔴 <b>T</b>\nAsks you: Which DB? (Postgres, SQLite)",
+                     "Needs your approval to run: npm test &amp;&amp; deploy",
+                     "Needs you to approve its plan",
+                     "🟡 <b>Fix &lt;login&gt;</b>\nWorking on: Add tests for login.py",
+                     "🟠 <b>T</b>\nNo activity for 20+ min",
+                     "🟢 <b>T</b>\nDone: I fixed it.\n<i>📁 P · 👤 b@x.com · just now</i>",
+                     "⚪ <b>T</b>\nSession closed"]:
+            self.assertIn(line, text)
+        self.assertNotIn("\n👤 ", text)                       # two accounts: shown per session
+        self.assertIn("🔴 1 needs you", status.status_text(items[:1]))
+
+    def test_readable_title(self):
+        for prompt, title in [
+                ("fix the login bug", "Fix the login bug"),
+                ("Can you please fix the bug in D:\\Claude\\VineTrip\\login.py? It crashes", "Fix the bug in login.py"),
+                ("Look at @src/app/main.py and https://www.github.com/Ranama/x/issues/3", "Look at main.py and github.com"),
+                ('open "C:\\Program Files\\My App\\settings.ini" and change the port', "Open settings.ini and change the port"),
+                ("Hi!\nCan you check why the bot doesn't start?", "Check why the bot doesn't start"),
+                ("Fix these issues:\n1. login crashes\n2. logout fails", "Fix these issues"),
+                ("Push it to my repository: https://github.com/Ranama/x", "Push it to my repository"),
+                ("```\nprint(1)\n```\nexplain this code", "Explain this code"),
+                ("<command-name>/clear</command-name>", "/clear"),
+                ("keep my_var as is, deploy on 1/2/2026", "Keep my_var as is, deploy on 1/2/2026"),
+                ("iOS build fails", "iOS build fails"), ("Note: it's down", "Note: it's down"),
+                ("my handle is @Ranama95", "My handle is @Ranama95"), ("Hi Claude!", "Hi Claude!"),
+                ("", None), (None, None)]:
+            self.assertEqual(status.readable_title(prompt), title, prompt)
+        long = status.readable_title("word " * 40)
+        self.assertTrue(long.endswith("…") and len(long) <= 50, long)
+        self.assertEqual(status.readable_title(long), long)
 
     def test_names(self):
         prof = self.dir / "work-profile"
@@ -107,7 +151,10 @@ class StatusTest(TempDirTest):
             {"type": "custom-title", "customTitle": "My title"}]), encoding="utf-8")
         self.assertEqual(status.session_title(str(t)), "My title")
         t.write_text(json.dumps({"type": "user", "message": {"content": "first prompt here"}}), encoding="utf-8")
-        self.assertEqual(status.session_title(str(t)), "first prompt here")
+        self.assertEqual(status.session_title(str(t)), "First prompt here")
+        t.write_text(json.dumps({"type": "user", "message": {"content": [
+            {"type": "image"}, {"type": "text", "text": "what is in D:/a/b/shot.png?"}]}}), encoding="utf-8")
+        self.assertEqual(status.session_title(str(t)), "What is in shot.png?")
         self.assertIsNone(status.session_title(str(self.dir / "missing.jsonl")))
         self.assertEqual(status.folder_name("D:\\Claude\\VineTrip\\"), "VineTrip")
 

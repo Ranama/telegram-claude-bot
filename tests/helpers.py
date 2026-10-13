@@ -18,9 +18,10 @@ class FakeTelegram:
         self.sent, self.calls, self.updates = [], [], []
         self.next_id = 100
 
-    def send(self, cfg, text, buttons=None, chat_id=None):
+    def send(self, cfg, text, buttons=None, chat_id=None, parse_mode=None):
         self.next_id += 1
-        self.sent.append({"chat": chat_id or cfg.get("chat_id"), "text": text, "buttons": buttons})
+        self.sent.append({"chat": chat_id or cfg.get("chat_id"), "text": text, "buttons": buttons,
+                          "parse_mode": parse_mode})
         return [self.next_id]
 
     def call(self, token, method, http_timeout=20, **params):

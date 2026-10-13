@@ -21,12 +21,14 @@ class BotTest(TempDirTest):
                                        "cwd": "/x/VineTrip", "prompt": "deploy it"})
         self.msg("/status")
         sent = self.tg.sent[-1]
-        self.assertIn("🟡 Working — VineTrip", sent["text"])
-        self.assertEqual(sent["buttons"], bot.REFRESH)
+        self.assertIn("🟡 <b>Deploy it</b>", sent["text"])
+        self.assertIn("<i>📁 VineTrip · just now</i>", sent["text"])
+        self.assertEqual((sent["buttons"], sent["parse_mode"]), (bot.REFRESH, "HTML"))
         self.bot.handle({"update_id": 2, "callback_query": {"id": "c1", "data": "status",
                          "message": {"message_id": 5, "chat": {"id": CHAT}}}})
         methods = [m for m, _ in self.tg.calls]
         self.assertEqual(methods, ["editMessageText", "answerCallbackQuery"])
+        self.assertEqual(self.tg.calls[0][1]["parse_mode"], "HTML")
 
     def test_only_your_chat(self):
         self.msg("/status", chat=999)

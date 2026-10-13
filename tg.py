@@ -49,12 +49,14 @@ def split(text, limit=LIMIT):
     return parts + [text]
 
 
-def send(cfg, text, buttons=None, chat_id=None):
-    """Send to your chat. Returns the message ids."""
+def send(cfg, text, buttons=None, chat_id=None, parse_mode=None):
+    """Send to your chat (parse_mode="HTML" for bold etc.). Returns the message ids."""
     ids = []
     parts = split(text)
     for i, part in enumerate(parts):
         params = {"chat_id": chat_id or cfg["chat_id"], "text": part, "disable_web_page_preview": True}
+        if parse_mode:
+            params["parse_mode"] = parse_mode
         if buttons and i == len(parts) - 1:
             params["reply_markup"] = {"inline_keyboard": buttons}
         ids.append(call(cfg["telegram_bot_token"], "sendMessage", **params)["message_id"])

@@ -23,7 +23,8 @@ import tg  # noqa: E402
 log = logging.getLogger("claude-telegram.bot")
 REFRESH = [[{"text": "🔄 Refresh", "callback_data": "status"}]]
 HELP = ("I tell you when a Claude Code session on your computer is ✅ done, ❓ needs input "
-        "or 🔐 needs approval.\n\n/status – all sessions right now")
+        "or 🔐 needs approval.\n\n/status – all sessions right now: 🔴 needs you, "
+        "🟡 working, 🟢 done")
 
 
 class Bot:
@@ -42,7 +43,7 @@ class Bot:
                 try:
                     self.call(self.token, "editMessageText", chat_id=self.chat_id,
                               message_id=msg.get("message_id"), text=self.status_text(),
-                              reply_markup={"inline_keyboard": REFRESH})
+                              parse_mode="HTML", reply_markup={"inline_keyboard": REFRESH})
                 except Exception as e:  # "message is not modified" when nothing changed
                     log.info("refresh: %s", e)
             self.call(self.token, "answerCallbackQuery", callback_query_id=cq.get("id"))
@@ -52,7 +53,7 @@ class Bot:
             return  # not your chat: ignore
         command = (msg.get("text") or "").split()[0].split("@")[0].lower() if msg.get("text") else ""
         if command == "/status":
-            self.send(self.cfg, self.status_text(), buttons=REFRESH)
+            self.send(self.cfg, self.status_text(), buttons=REFRESH, parse_mode="HTML")
         else:
             self.send(self.cfg, HELP)
 

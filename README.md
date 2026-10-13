@@ -18,7 +18,27 @@ Claude asks: Which database? (Postgres, SQLite)
 Claude wants to run: npm run deploy
 ```
 
-`/status` in Telegram lists all sessions of all your Claude accounts on the computer: 🟡 working, ❓ needs input, 🔐 needs approval, ✅ completed, ⏹ closed.
+`/status` in Telegram lists all sessions of all your Claude accounts on the computer, most urgent first, with a 🔄 Refresh button:
+
+```
+📋 Claude sessions
+👤 you@example.com
+🔴 1 needs you · 🟡 1 working · 🟢 1 done
+
+🔴 Login bug fix
+Asks you: Which database? (Postgres, SQLite)
+📁 VineTrip · 2 min ago
+
+🟡 Deploy script
+Working on: Run the tests and deploy
+📁 shop · just now
+
+🟢 Write a README for notes
+Done: I wrote README.md with setup steps.
+📁 Claude · 1 h ago
+```
+
+🔴 needs you (a question or an approval) · 🟡 working · 🟢 done · 🟠 no activity for 20+ min · ⚪ closed. Sessions are named by Claude Code's title, or by your first message cleaned up (file names instead of paths, no "can you please").
 
 Python 3.8+ standard library only. Windows, macOS, Linux.
 
@@ -47,12 +67,12 @@ Claude Code [hooks](https://code.claude.com/docs/en/hooks) run `hook.py` on thes
 | Event | Lock file | State | Telegram |
 |---|---|---|---|
 | UserPromptSubmit (you send a command) | created | 🟡 working | — |
-| PermissionRequest | | ❓ needs input / 🔐 needs approval | message |
-| Notification (input needed) | | ❓ needs input | message |
-| Stop (Claude is done) | deleted | ✅ completed | message |
-| SessionEnd | deleted | ⏹ closed | — |
+| PermissionRequest | | 🔴 needs input / approval | ❓ / 🔐 message |
+| Notification (input needed) | | 🔴 needs input | ❓ message |
+| Stop (Claude is done) | deleted | 🟢 completed | ✅ message |
+| SessionEnd | deleted | ⚪ closed | — |
 
-Lock files are `status/locks/<session>.lock`; the latest state per session is `status/sessions/<session>.json`. Approving something on the PC counts as working again once Claude continues; a lock without activity for 20 minutes shows as ⚠️ no activity.
+Lock files are `status/locks/<session>.lock`; the latest state per session is `status/sessions/<session>.json`. Approving something on the PC counts as working again once Claude continues; a lock without activity for 20 minutes shows as 🟠 inactive (e.g. after an interrupt).
 
 Only your chat gets messages and answers (`chat_id` in `config.json`, git-ignored with the token).
 

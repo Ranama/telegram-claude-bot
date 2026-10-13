@@ -8,17 +8,27 @@ Status of every Claude Code session on this computer, kept up to date by hook.py
 States: working, needs_input, needs_approval, completed, ended (closed), and stalled
 (a lock without any activity for 20 minutes, e.g. after an interrupt).
 """
+import html
 import json
 import os
 import re
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 STATUS_DIR = "status"
 STALLED_SECONDS = 20 * 60
 LIST_HOURS = 24
 
-STATES = {  # state: (emoji, label, order in lists)
+# /status colours: 🔴 needs you, 🟡 working, 🟢 done (icon, one, several, states)
+GROUPS = (("🔴", "needs you", "need you", ("needs_input", "needs_approval")),
+          ("🟡", "working", "working", ("working",)),
+          ("🟠", "inactive", "inactive", ("stalled",)),
+          ("🟢", "done", "done", ("completed",)),
+          ("⚪", "closed", "closed", ("ended",)))
+COLORS = {state: icon for icon, _, _, states in GROUPS for state in states}
+
+STATES = {  # state: (emoji in notifications, label, order in lists)
     "needs_input": ("❓", "Needs input", 0),
     "needs_approval": ("🔐", "Needs approval", 1),
     "working": ("🟡", "Working", 2),
@@ -102,8 +112,65 @@ def account_label(config_dir=None):
     return email or (folder_name(config_dir) if config_dir else "default account")
 
 
+CODE_BLOCK = re.compile(r"```.*?```", re.S)
+LIST_MARK = re.compile(r"^\s*(#+|[-*•>]|\d+[.)])\s+")
+TAG = re.compile(r"</?[A-Za-z][\w:-]*(?:\s[^<>]*)?>")                 # <command-name> etc.
+URL = re.compile(r"https?://[^\s<>\"'`)\]]+")
+MENTION = re.compile(r'(?<!\S)@(?:"([^"]+)"|(\S+))')                   # @file, @"a file"
+PATH = re.compile(r'"[^"\n]*[\\/][^"\n]*[\\/][^"\n]*"'                 # "C:\Program Files\x"
+                  r"|[^\s\"'`()<>]*[\\/][^\s\"'`()<>\\/]+[\\/][^\s\"'`()<>]*")
+FILLER = re.compile(r"^(?:(?:hey|hi|hello|thanks|thank you|great|perfect|nice|cool)(?:\s+claude)?\s*[,!.:\n]\s*"
+                    r"|(?:hey|hi|hello)\s+claude\s+|claude[,:]\s*)?(?:ok(?:ay)?\b[,!.]?\s*)?"
+                    r"(?P<ask>(?:can|could)\s+you\s+)?(?:please\s+|pls\s+)?", re.I)  # "Hi! Can you please"
+
+
+def _last_part(path):
+    parts = [p for p in re.split(r"[\\/]+", path.strip("\"'")) if re.search(r"\w", p)]
+    return parts[-1] if parts else ""
+
+
+def _path(match):
+    token = match.group(0)
+    return _last_part(token) if re.search(r"[A-Za-z]", token) else token  # 1/2/2026 is a date
+
+
+def _mention(match):
+    name = match.group(1) or match.group(2)
+    return _last_part(name) if match.group(1) or re.search(r"[\\/.]", name) else match.group(0)
+
+
+def _host(match):
+    host = urlsplit(match.group(0)).hostname or ""
+    return host[4:] if host.startswith("www.") else host
+
+
+def readable_title(text, limit=50):
+    """A short, readable name from a prompt or title: file names instead of paths,
+    sites instead of links, no code or markup, no "can you please"; the first sentence."""
+    text = TAG.sub(" ", CODE_BLOCK.sub(" ", str(text or "")[:2000]))  # the start is enough
+    text = PATH.sub(_path, MENTION.sub(_mention, URL.sub(_host, text)))
+    lines = (" ".join(LIST_MARK.sub("", line).replace("**", "").replace("__", "").replace("`", "").split())
+             for line in text.splitlines())
+    text = "\n".join(line for line in lines if line).strip(" -:;,")
+    polite = FILLER.match(text)
+    if polite.end() and text[polite.end():].strip():
+        text = text[polite.end():]
+    text = re.split(r"(?<=[.!?])\s+|\n", text)[0]          # the first sentence or line
+    head, colon, _ = text.partition(": ")
+    if colon and len(head.split()) >= 3:                    # "Push it to my repo: https://…"
+        text = head
+    text = text.strip(" -:;,").rstrip(".")
+    if polite.group("ask"):
+        text = text.rstrip("?")                              # "Can you fix X?" → "Fix X"
+    if len(text) > limit:
+        text = text[:limit - 1].rsplit(" ", 1)[0].rstrip(" ,;:-") + "…"
+    if re.match(r"[a-z]+\b", text):              # "fix the bug" → "Fix the bug" (not iOS)
+        text = text[0].upper() + text[1:]
+    return text or None
+
+
 def session_title(transcript_path):
-    """The session's title (as shown in Claude Code), else its first prompt."""
+    """The session's title (as shown in Claude Code), else its first prompt; readable."""
     try:
         with open(transcript_path, "rb") as f:
             data = f.read()
@@ -124,13 +191,12 @@ def session_title(transcript_path):
             title = ("ai", entry["aiTitle"])
         elif kind == "user" and not first and not entry.get("isMeta"):
             content = (entry.get("message") or {}).get("content")
+            if isinstance(content, list):          # a prompt with attachments: its text parts
+                content = " ".join(b.get("text") or "" for b in content
+                                   if isinstance(b, dict) and b.get("type") == "text")
             if isinstance(content, str) and content.strip() and not content.lstrip().startswith("<"):
                 first = content
-    return one_line(title[1], 70) if title else (one_line(first, 70) if first else None)
-
-
-CODE_BLOCK = re.compile(r"```.*?```", re.S)
-LIST_MARK = re.compile(r"^\s*(#+|[-*•>]|\d+[.)])\s+")
+    return readable_title(title[1] if title else first)
 
 
 def short_summary(text, limit=220, enough=50):
@@ -179,7 +245,7 @@ def record_event(base, event, now=None, config_dir=None):
         if event.get(key):
             rec[key] = event[key]
     rec["project"] = folder_name(rec.get("cwd"))
-    title = event.get("session_title") or session_title(rec.get("transcript_path"))
+    title = readable_title(event.get("session_title")) or session_title(rec.get("transcript_path"))
     if title:
         rec["title"] = title
 
@@ -258,32 +324,61 @@ def current(base, now=None, hours=LIST_HOURS):
         state, activity = derive_state(base, rec, now)
         if now - activity > hours * 3600 and state not in ("working", "needs_input", "needs_approval"):
             continue
-        emoji, label, order = STATES.get(state, STATES["completed"])
-        items.append({"state": state, "emoji": emoji, "label": label, "order": order,
+        items.append({"state": state, "order": STATES.get(state, STATES["completed"])[2],
                       "activity": activity, "ago": ago(now - activity),
                       "project": rec.get("project") or "?", "account": rec.get("account") or "?",
-                      "title": rec.get("title") or rec.get("prompt") or "(untitled)",
+                      "title": rec.get("title") or readable_title(rec.get("prompt")) or "Untitled session",
+                      "prompt": rec.get("prompt") or "",
                       "detail": rec.get("detail") or "", "summary": rec.get("summary") or "",
                       "session_id": rec["session_id"]})
     items.sort(key=lambda i: (i["order"], -i["activity"]))
     return items
 
 
-def status_text(items, limit=20):
-    """The /status message in Telegram."""
+REWORD = ((re.compile(r"^Claude asks:\s*"), "Asks you: "),
+          (re.compile(r"^Claude wants you to "), "Needs you to "),
+          (re.compile(r"^Claude wants to "), "Needs your approval to "),
+          (re.compile(r"^Claude needs "), "Needs "))
+
+
+def _what(item):
+    """What's happening, in plain words: 'Asks you: Which database?', 'Done: …'."""
+    state, detail = item["state"], item.get("detail") or ""
+    if state in ("needs_input", "needs_approval"):
+        for pattern, words in REWORD:
+            if pattern.match(detail):
+                return pattern.sub(words, detail, count=1)
+        what = "Needs your input" if state == "needs_input" else "Needs your approval"
+        return f"{what}: {detail}" if detail else what
+    if state == "working":
+        task = readable_title(item.get("prompt"), 80)
+        return f"Working on: {task}" if task and task != item.get("title") else "Working on it…"
+    if state == "stalled":
+        return "No activity for 20+ min — interrupted or stuck?"
+    if state == "completed":                                 # "Done. I fixed it." → "Done: I fixed it."
+        summary = re.sub(r"^(?:all\s+)?done(?:[.!:,]+\s*|$)|^\(no text\)$", "", item.get("summary") or "", flags=re.I)
+        return f"Done: {summary}" if summary else "Done"
+    return "Session closed"
+
+
+def status_text(items, limit=15, now=None):
+    """The /status message (Telegram HTML): a coloured line per session, most urgent first."""
+    esc = lambda t: html.escape(str(t), quote=False)  # noqa: E731
+    clock = time.strftime("%H:%M:%S", time.localtime(now or time.time()))
     if not items:
-        return "📋 No Claude Code sessions in the last 24 hours."
-    counts = {}
-    for item in items:
-        counts[item["state"]] = counts.get(item["state"], 0) + 1
-    totals = "  ".join(f"{STATES[s][0]} {n}" for s, n in sorted(counts.items(), key=lambda x: STATES[x[0]][2]))
-    lines = [f"📋 Claude sessions — {totals}", ""]
+        return f"📋 <b>Claude sessions</b>\nNo sessions in the last {LIST_HOURS} hours.\n\n🕒 Updated {clock}"
+    accounts = sorted({i["account"] for i in items})
+    lines = ["📋 <b>Claude sessions</b>"] + ([f"👤 {esc(accounts[0])}"] if len(accounts) == 1 else [])
+    lines.append(" · ".join(f"{icon} {n} {one if n == 1 else several}"
+                            for icon, one, several, states in GROUPS
+                            for n in [sum(i["state"] in states for i in items)] if n))
     for item in items[:limit]:
-        lines.append(f"{item['emoji']} {item['label']} — {item['project']} · “{one_line(item['title'], 50)}”")
-        lines.append(f"    👤 {item['account']} · {item['ago']}")
-        extra = item["detail"] or (item["summary"] if item["state"] == "completed" else "")
-        if extra:
-            lines.append(f"    {one_line(extra, 120)}")
+        where = [f"📁 {esc(item['project'])}"] + ([f"👤 {esc(item['account'])}"] if len(accounts) > 1 else [])
+        lines += ["",
+                  f"{COLORS.get(item['state'], '⚪')} <b>{esc(one_line(item['title'], 60))}</b>",
+                  esc(one_line(_what(item), 120)),
+                  f"<i>{' · '.join(where + [item['ago']])}</i>"]
     if len(items) > limit:
-        lines.append(f"… and {len(items) - limit} more")
+        lines += ["", f"… and {len(items) - limit} more"]
+    lines += ["", f"🕒 Updated {clock}"]
     return "\n".join(lines)
