@@ -42,7 +42,7 @@ class NotifyTest(unittest.TestCase):
         self.base = Path(self.tmp.name)
         (self.base / "config.json").write_text(json.dumps({
             "telegram_bot_token": "123456789:" + "A" * 35, "allowed_usernames": ["Ranama95"],
-            "accounts": {"main": {}}}), encoding="utf-8")
+            "telegram_control": True, "accounts": {"main": {}}}), encoding="utf-8")
         (self.base / "state.json").write_text(json.dumps({
             "chats": {str(CHAT): {"account": "main", "sessions": {}}},
             "pinned_users": {"ranama95": CHAT}}), encoding="utf-8")
@@ -119,6 +119,52 @@ class NotifyTest(unittest.TestCase):
         self.assertEqual(notify.send_text("Backup finished", base=self.base,
                                           api_factory=lambda token: self.api), 1)
         self.assertEqual(self.api.sent, [(CHAT, "Backup finished")])
+
+    # ---- notifications only (the default): one short line per event
+
+    def notify_only(self):
+        cfg = json.loads((self.base / "config.json").read_text(encoding="utf-8"))
+        cfg["telegram_control"] = False
+        (self.base / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+    def test_notify_only_done_is_one_short_line(self):
+        self.notify_only()
+        self.handle(self.stop_event("**Done.** I added the login page and wrote tests for it. "
+                                    "All 12 tests pass.\n\n- details\n- more details"))
+        self.assertEqual(self.api.sent[0][1],
+                         "✅ Done — VineTrip: Done. I added the login page and wrote tests for it.")
+
+    def test_notify_only_needs_you(self):
+        self.notify_only()
+        self.handle({"hook_event_name": "Notification", "notification_type": "idle_prompt",
+                     "session_id": "s", "cwd": "/x/proj", "message": "Claude is waiting for your input"})
+        self.handle({"hook_event_name": "Notification", "notification_type": "permission_prompt",
+                     "session_id": "s", "cwd": "/x/proj", "message": "Claude needs your permission to use Bash"})
+        self.assertEqual(self.api.sent[0][1], "❓ proj needs you: Claude is waiting for your input")
+        self.assertEqual(self.api.sent[1][1],
+                         "🔐 proj needs your OK on the PC: Claude needs your permission to use Bash")
+        self.assertEqual(self.api.buttons, [None, None])
+
+    def test_notify_only_questions_are_announced_not_answered(self):
+        self.notify_only()
+        event = {"hook_event_name": "PermissionRequest", "session_id": "s", "cwd": "/x/shop",
+                 "tool_name": "AskUserQuestion", "tool_input": {"questions": [
+                     {"question": "Which color?", "options": [{"label": "Red"}, {"label": "Blue"}]}]}}
+        self.assertIsNone(notify.handle_permission(event, base=self.base, api_factory=lambda t: self.api))
+        self.assertEqual(self.api.sent[0][1], "❓ shop needs you — Claude asks: Which color? (Red, Blue)")
+        self.assertIsNone(notify.handle_permission(self.perm_event(), base=self.base,
+                                                   api_factory=lambda t: self.api))
+        self.assertEqual(len(self.api.sent), 1)          # a permission prompt: the Notification covers it
+        self.assertFalse((self.base / "pending").exists() and any((self.base / "pending").iterdir()))
+
+    def test_short_summary(self):
+        self.assertEqual(notify.short_summary("Fixed it."), "Fixed it.")
+        self.assertEqual(notify.short_summary("```py\nx=1\n```\nThe script runs and prints one, "
+                                              "which is what we wanted to check."),
+                         "The script runs and prints one, which is what we wanted to check.")
+        long = notify.short_summary("word " * 200)
+        self.assertLessEqual(len(long), 221)
+        self.assertTrue(long.endswith("…"))
 
     # ---- PermissionRequest: answered from Telegram
 

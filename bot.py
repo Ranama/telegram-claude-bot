@@ -57,6 +57,26 @@ Your Claude Code sessions on the PC (desktop app or terminal):
 When a Claude Code session on the PC (desktop app or terminal) finishes or waits
 for you, you get a message here: reply to it to continue that session."""
 
+HELP_NOTIFY = """Claude ⇄ Telegram — notifications only
+
+You get a message when a Claude Code session on the PC
+• finishes: ✅ with a one-line description, or
+• needs you: ❓ input or a question, 🔐 approval on the PC.
+
+/notify off – pause these messages
+/notify on – turn them back on
+/whoami – your Telegram user id
+
+Controlling Claude from Telegram is turned off. To turn it on, set
+"telegram_control": true in config.json and restart the bot."""
+
+NOTIFY_ONLY_REPLY = "This bot only sends you notifications (✅ done / ❓ needs you). /help"
+
+NOTIFY_COMMANDS = [
+    ("notify", "Pause or resume notifications: /notify off"),
+    ("help", "What this bot does"),
+]
+
 BOT_COMMANDS = [
     ("list", "Claude Code sessions on the PC"),
     ("enter", "Go into a PC session: /enter 2"),
@@ -541,6 +561,8 @@ class Bot:
         self.job_timeout = int(config.get("job_timeout_seconds", 3600))
         self.base_dir = Path(state.path).resolve().parent
         self.listings = {}  # chat_id -> the sessions shown by the last /list
+        # False (default): notifications only. True: run/continue/answer Claude from Telegram.
+        self.control = bool(config.get("telegram_control", False))
         self.outbox_tries = {}
         self.jobs = {}  # chat_id -> job dict
         self.jobs_lock = threading.Lock()
@@ -573,7 +595,11 @@ class Bot:
 
     def handle_update(self, update):
         if update.get("callback_query"):
-            self.handle_callback(update["callback_query"])
+            if self.control:
+                self.handle_callback(update["callback_query"])
+            else:
+                self.api.answer_callback(update["callback_query"].get("id"),
+                                         "Control from Telegram is off.")
             return
         msg = update.get("message")
         if not msg or "text" not in msg:
@@ -595,6 +621,15 @@ class Bot:
                 self.api.send(chat_id, f"Not authorized. Your Telegram user id is {user_id} — "
                                        "add it to allowed_user_ids (or your @handle to "
                                        "allowed_usernames) in config.json.")
+            return
+
+        if not self.control:
+            if cmd in ("/start", "/help"):
+                self.api.send(chat_id, HELP_NOTIFY)
+            elif cmd == "/notify":
+                self.cmd_notify(chat_id, arg)
+            else:
+                self.api.send(chat_id, NOTIFY_ONLY_REPLY)
             return
 
         reply_to = (msg.get("reply_to_message") or {}).get("message_id")
@@ -1231,9 +1266,11 @@ class Bot:
 
     def run_forever(self):
         try:
-            self.api.set_commands(BOT_COMMANDS)
+            self.api.set_commands(BOT_COMMANDS if self.control else NOTIFY_COMMANDS)
         except Exception as e:
             log.warning("setMyCommands failed: %s", e)
+        log.info("Mode: %s", "control from Telegram" if self.control else
+                 "notifications only (set \"telegram_control\": true in config.json to control Claude from Telegram)")
         (self.base_dir / OUTBOX_DIR).mkdir(exist_ok=True)
         threading.Thread(target=self._outbox_loop, daemon=True).start()
         log.info("Bot running. Accounts: %s", ", ".join(self.accounts))

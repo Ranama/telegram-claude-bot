@@ -45,6 +45,7 @@ class BotTest(unittest.TestCase):
         (d / "wb").mkdir()
         self.cfg = {
             "allowed_user_ids": [ME], "claude_bin": [sys.executable, FAKE], "job_timeout_seconds": 30,
+            "telegram_control": True,
             "accounts": {
                 "personal": {"config_dir": str(d / "prof-a"), "workdir": str(d / "wa"),
                              "permission_mode": "acceptEdits"},
@@ -480,6 +481,24 @@ class BotTest(unittest.TestCase):
         self.assertEqual(botmod.notify_settings(Path(self.tmp.name)), {"enabled": False, "away": True})
         self.say("/away off")
         self.assertIn("Away mode OFF", self.api.last(CHAT_A))
+
+    def test_notifications_only_mode(self):
+        cfg = dict(self.cfg, telegram_control=False)
+        self.bot = botmod.Bot(cfg, self.api, botmod.State(Path(self.tmp.name) / "n.json"))
+        self.say("please do something")
+        self.assertEqual(self.api.last(CHAT_A), botmod.NOTIFY_ONLY_REPLY)
+        self.assertFalse(self.bot.jobs)                              # nothing was run
+        self.say("/list")
+        self.assertEqual(self.api.last(CHAT_A), botmod.NOTIFY_ONLY_REPLY)
+        self.say("/help")
+        self.assertIn("notifications only", self.api.last(CHAT_A))
+        self.say("/notify off")
+        self.assertIn("OFF", self.api.last(CHAT_A))
+        self.tap("p:0a1b2c3d:allow")
+        self.assertEqual(self.api.callbacks[-1], "Control from Telegram is off.")
+        count = len(self.api.sent)
+        self.say("hello", user=STRANGER)                             # still only you
+        self.assertEqual(len(self.api.sent), count)
 
     def test_long_message_split(self):
         chunks = botmod.split_message("x\n" * 5000)

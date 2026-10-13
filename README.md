@@ -2,7 +2,12 @@
 
 [![tests](https://github.com/Ranama/telegram-claude-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/Ranama/telegram-claude-bot/actions/workflows/tests.yml)
 
-Control Claude Code on one or more Claude accounts from Telegram. Send a message, Claude works on it on your computer, and you get a Telegram message when it's done — with the result, time and cost. Only Telegram users you approve can use it.
+Get a Telegram message when Claude Code on your PC finishes a task (✅ with a one-line description) or needs you (❓ input or a question, 🔐 approval). Optionally, also control Claude from Telegram: start tasks, continue sessions, answer questions with buttons. Only Telegram users you approve can use it.
+
+## Two modes
+
+- **Notifications only** (default, `"telegram_control": false`): one short message when a session on the PC finishes or needs you. Messages you send the bot don't run anything.
+- **Control from Telegram** (`"telegram_control": true` in `config.json`, then restart the bot): everything below — run tasks, `/list` and `/enter` sessions, reply to continue, answer permissions and questions with buttons, `/away`.
 
 Python 3.8+ standard library only — nothing to `pip install`.
 
@@ -17,7 +22,7 @@ Python 3.8+ standard library only — nothing to `pip install`.
 
 Keep the window open — closing it stops the bot. Next time, `start.bat` skips the steps that are already done and starts the bot straight away. Everything is logged to `setup.log` and `bot.log` in this folder (the token is never logged).
 
-## Work in your PC sessions from Telegram
+## Work in your PC sessions from Telegram — control mode
 
 Every Claude Code session on the PC — started in the desktop app's Code tab, a terminal, or by this bot — can be continued from Telegram, without starting a new one:
 
@@ -31,7 +36,7 @@ fix the failing test     ← goes to that session; you get Claude's answer back
 
 Sessions are looked up in `~/.claude/projects` (and every account's profile) and in the Claude desktop app's own data folders; the folders found are listed in `bot.log` at startup. Sessions whose folder isn't on this PC (for example from the app's sandbox) are shown as *view only*. `/enter` also takes a session id (or its first characters). While you're in a session, `/continue` and `/status` apply to it, and `/new` leaves it. Claude runs in the session's own folder and Claude profile, with the bot's permission settings. If a session is 🟢 (busy on the PC right now), let it finish before you send something.
 
-## Answer Claude from Telegram (buttons)
+## Answer Claude from Telegram (buttons) — control mode
 
 When Claude needs **permission** for something (run a command, edit a file) or asks you a **multiple-choice question**, you can answer in Telegram:
 

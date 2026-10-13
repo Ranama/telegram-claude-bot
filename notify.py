@@ -54,10 +54,49 @@ def project_name(cwd):
     return parts[-1] or str(cwd)
 
 
-def compose(event):
-    """Telegram text for a Stop/Notification event, or None if it isn't worth a message."""
+CODE_BLOCK = re.compile(r"```.*?```", re.S)
+LIST_MARK = re.compile(r"^\s*(#+|[-*•>]|\d+[.)])\s+")
+
+
+def short_summary(text, limit=220, enough=50):
+    """The first sentence or two of Claude's answer as one plain line."""
+    lines = []
+    for line in CODE_BLOCK.sub(" ", text or "").splitlines():
+        line = LIST_MARK.sub("", line).replace("**", "").replace("__", "").replace("`", "").strip()
+        if line:
+            lines.append(line)
+    out = ""
+    for sentence in re.split(r"(?<=[.!?])\s+", " ".join(lines)):
+        out = f"{out} {sentence}".strip()
+        if len(out) >= enough:
+            break
+    if len(out) > limit:
+        out = out[:limit].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+    return out or "(no text)"
+
+
+def control_enabled(cfg):
+    """Answering/continuing from Telegram ("telegram_control"); off = notifications only."""
+    return bool(cfg.get("telegram_control", False))
+
+
+def compose(event, control=True):
+    """Telegram text for a Stop/Notification event, or None if it isn't worth a message.
+    control=False (notifications only): one short line per event."""
     name = event.get("hook_event_name")
     where = project_name(event.get("cwd"))
+    if not control:
+        if name == "Stop":
+            return f"✅ Done — {where}: {short_summary(event.get('last_assistant_message'))}"
+        if name == "Notification":
+            kind = event.get("notification_type") or ""
+            if kind and kind not in WAITING_TYPES:
+                return None
+            message = (event.get("message") or "Claude is waiting for your input").strip()
+            if kind == "permission_prompt":
+                return f"🔐 {where} needs your OK on the PC: {message}"
+            return f"❓ {where} needs you: {message}"
+        return None
     if name == "Stop":
         text = (event.get("last_assistant_message") or "").strip() or "(no text)"
         if len(text) > MAX_TEXT:
@@ -102,10 +141,10 @@ def handle(event, base=HERE, api_factory=None):
         return 0  # Claude is continuing because of another Stop hook
     if not notify_enabled(base):
         return 0
-    text = compose(event)
+    cfg, state = load(base)
+    text = compose(event, control_enabled(cfg))
     if not text or not event.get("session_id"):
         return 0
-    cfg, state = load(base)
     api = make_api(cfg, api_factory)
     if not api:
         return 0
@@ -241,8 +280,36 @@ def _cleanup(base, rid):
             pass
 
 
+def notify_question(event, base=HERE, api_factory=None):
+    """Notifications only: tell you Claude asked a question (you answer it on the PC)."""
+    questions = (event.get("tool_input") or {}).get("questions") or []
+    if not questions or os.environ.get(bot.BOT_ENV_FLAG) or not notify_enabled(base):
+        return 0
+    cfg, state = load(base)
+    api = make_api(cfg, api_factory)
+    if not api:
+        return 0
+    q = questions[0]
+    options = ", ".join(str(o.get("label")) for o in q.get("options") or [])
+    text = f"❓ {project_name(event.get('cwd'))} needs you — Claude asks: {q.get('question', '')}"
+    if options:
+        text += f" ({options})"
+    if len(questions) > 1:
+        text += f" + {len(questions) - 1} more question(s)"
+    sent = sum(len(api.send(chat, text) or []) for chat in target_chats(cfg, state))
+    log.info("question notification -> %d message(s)", sent)
+    return sent
+
+
 def handle_permission(event, base=HERE, api_factory=None, **kwargs):
     """PermissionRequest hook: the JSON to print, or None to let Claude Code ask on the PC."""
+    cfg, _ = load(base)
+    if not control_enabled(cfg):
+        # Notifications only: questions get a message (permission prompts already get
+        # one through the Notification hook); Claude Code asks on the PC as usual.
+        if event.get("tool_name") == "AskUserQuestion":
+            notify_question(event, base, api_factory)
+        return None
     if not should_ask_on_telegram(base):
         return None
     decision = ask_on_telegram(event, base=base, api_factory=api_factory, **kwargs)
