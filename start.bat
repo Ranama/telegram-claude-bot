@@ -1,50 +1,43 @@
 @echo off
-setlocal
+rem Claude-Telegram bot: double-click to set up (first time) and start the bot.
+rem Everything else (installing and signing in Claude Code, the bot token) is done
+rem by setup_bot.py in this same window. Its log is setup.log, the bot's is bot.log.
+setlocal EnableExtensions
 cd /d "%~dp0"
 title Claude Telegram bot
 
-where python >nul 2>nul
-if errorlevel 1 (
-  echo [X] Python is not installed.
-  echo     Install it from https://www.python.org/downloads/ and tick "Add python.exe to PATH".
-  echo     Then run start.bat again.
-  pause & exit /b 1
-)
+rem Find a working Python 3.8+. The Microsoft Store "python" shortcut doesn't count.
+set "PYCHECK=import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)"
+set "PY="
+python -c "%PYCHECK%" >nul 2>&1 && set "PY=python"
+if defined PY goto run
+py -3 -c "%PYCHECK%" >nul 2>&1 && set "PY=py -3"
+if defined PY goto run
+call :find_python
+if defined PY goto run
 
-rem Claude Code: on PATH, or in the native installer's default folder.
-where claude >nul 2>nul
-if errorlevel 1 (
-  if exist "%USERPROFILE%\.local\bin\claude.exe" (
-    set "PATH=%USERPROFILE%\.local\bin;%PATH%"
-  ) else (
-    echo [X] Claude Code is not installed. The Claude desktop app does not include it.
-    echo     1. Open PowerShell and run:  irm https://claude.ai/install.ps1 ^| iex
-    echo     2. Open a NEW PowerShell window and run:  claude
-    echo        Log in in the browser when asked, then type /exit
-    echo     3. Run start.bat again.
-    pause & exit /b 1
-  )
-)
+echo Python 3 is needed to run the bot and was not found on this PC.
+where winget >nul 2>&1 || goto no_python
+choice /c YN /m "Install Python 3.12 now (with winget)"
+if errorlevel 2 goto no_python
+winget install -e --id Python.Python.3.12
+call :find_python
+if not defined PY goto no_python
 
-if not exist config.json (
-  copy config.example.json config.json >nul
-)
-
-findstr /c:"PASTE-TOKEN-FROM-BOTFATHER" config.json >nul
-if not errorlevel 1 (
-  echo [!] Paste your bot token from @BotFather into config.json.
-  echo     Notepad is opening - replace PASTE-TOKEN-FROM-BOTFATHER, save, close Notepad.
-  notepad config.json
-  findstr /c:"PASTE-TOKEN-FROM-BOTFATHER" config.json >nul
-  if not errorlevel 1 (
-    echo [X] The token is still missing. Run start.bat again when you have it.
-    pause & exit /b 1
-  )
-)
-
-echo [OK] Starting the bot. Keep this window open - closing it stops the bot.
+:run
+%PY% setup_bot.py config.json
 echo.
-python bot.py config.json
-echo.
-echo The bot stopped.
+echo The bot has stopped. (Details: setup.log and bot.log in this folder.)
 pause
+exit /b
+
+:find_python
+for /d %%D in ("%LOCALAPPDATA%\Programs\Python\Python3*") do if exist "%%D\python.exe" set "PY="%%D\python.exe""
+exit /b
+
+:no_python
+echo.
+echo [X] Python 3 is required. Install it from https://www.python.org/downloads/
+echo     (tick "Add python.exe to PATH"), then double-click start.bat again.
+pause
+exit /b 1

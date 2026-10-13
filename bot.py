@@ -11,13 +11,16 @@ No third-party dependencies: Python 3.9+ standard library only.
 """
 import json
 import logging
+import logging.handlers
 import os
+import re
 import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -28,6 +31,7 @@ TG_LIMIT = 4000  # Telegram max is 4096 chars per message; leave headroom
 HELP = """Claude ⇄ Telegram
 
 Just send a message → it goes to Claude, continuing the current session.
+(With a single account, chats are linked to it automatically.)
 
 /accounts – list Claude accounts
 /link <account> – link this chat to an account
@@ -159,21 +163,113 @@ def kill_tree(proc):
         pass
 
 
-def resolve_bin(name):
-    """Find the Claude Code executable.
+def claude_install_locations():
+    """Where Claude Code's installers put the `claude` command.
 
-    Popen needs a full path on Windows, and the native installer's folder
-    (~/.local/bin) is often not on PATH until a new terminal is opened.
+    The native installer's folder (~/.local/bin) is often not on PATH until a new
+    terminal is opened, so it is checked explicitly.
     """
+    home = Path.home()
+    places = [home / ".local" / "bin" / "claude.exe", home / ".local" / "bin" / "claude"]
+    if IS_WINDOWS:
+        if os.environ.get("APPDATA"):
+            places.append(Path(os.environ["APPDATA"]) / "npm" / "claude.cmd")
+    else:
+        places += [Path("/opt/homebrew/bin/claude"), Path("/usr/local/bin/claude")]
+    return places
+
+
+def find_claude(name="claude"):
+    """Full path of the Claude Code executable, or None if it isn't installed."""
     found = shutil.which(os.path.expanduser(name))
     if found:
         return found
     if name == "claude":
-        for candidate in ("~/.local/bin/claude.exe", "~/.local/bin/claude"):
-            path = os.path.expanduser(candidate)
-            if os.path.isfile(path):
-                return path
-    return name
+        for path in claude_install_locations():
+            if path.is_file():
+                return str(path)
+    return None
+
+
+def resolve_bin(name):
+    return find_claude(name) or name
+
+
+def account_env(acc):
+    """Environment for running Claude Code as one configured account."""
+    env = os.environ.copy()
+    if acc.get("config_dir"):
+        env["CLAUDE_CONFIG_DIR"] = os.path.expanduser(acc["config_dir"])
+    env.update({k: str(v) for k, v in (acc.get("env") or {}).items()})
+    return env
+
+
+def run_quiet(cmd, env=None, timeout=60):
+    """Run a short command; return (exit code, combined output) or (None, error)."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=timeout, env=env, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, str(e)
+    return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
+
+
+def claude_version(claude_cmd, env=None):
+    """'2.1.300 (Claude Code)' if claude_cmd really is Claude Code, else None."""
+    code, out = run_quiet(list(claude_cmd) + ["--version"], env=env)
+    if code is None or "Claude Code" not in out:
+        return None
+    return out.splitlines()[-1].strip()
+
+
+def claude_auth_status(claude_cmd, env=None):
+    """(True/False, details) from `claude auth status --json`; (None, error) if unknown."""
+    code, out = run_quiet(list(claude_cmd) + ["auth", "status", "--json"], env=env)
+    if code is None:
+        return None, out
+    start = out.find("{")
+    try:
+        data = json.loads(out[start:out.rfind("}") + 1]) if start >= 0 else None
+    except json.JSONDecodeError:
+        data = None
+    if not isinstance(data, dict):
+        return None, out[-300:]
+    return bool(data.get("loggedIn")), data
+
+
+LOGIN_ERROR = re.compile(r"/login|invalid api key|not logged in|oauth token|authentication_error|"
+                         r"please log in|unauthori[sz]ed", re.I)
+LOGIN_HINT = ("\n\n🔑 Claude Code isn't signed in for this account. On the PC, double-click "
+              "start.bat — it signs you in (or run: claude auth login).")
+
+
+class InstanceLock:
+    """Stops two copies of the bot polling Telegram with the same token."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.fh = None
+
+    def acquire(self):
+        fh = open(self.path, "a+")
+        try:
+            if IS_WINDOWS:
+                import msvcrt
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.close()
+            return False
+        self.fh = fh
+        return True
+
+    def release(self):
+        if self.fh:
+            self.fh.close()
+            self.fh = None
 
 
 # ---------------------------------------------------------------- telegram
@@ -218,7 +314,7 @@ class State:
         self.path = Path(path)
         self.lock = threading.RLock()
         if self.path.exists():
-            self.data = json.loads(self.path.read_text(encoding="utf-8"))
+            self.data = json.loads(self.path.read_text(encoding="utf-8-sig"))
         else:
             self.data = {}
         self.data.setdefault("offset", 0)
@@ -244,7 +340,13 @@ class State:
         with self.lock:
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
-            os.replace(tmp, self.path)
+            for _ in range(10):
+                try:
+                    os.replace(tmp, self.path)
+                    return
+                except PermissionError:  # Windows: file briefly held by antivirus/indexer
+                    time.sleep(0.2)
+            log.warning("Could not save %s (file is locked by another program)", self.path)
 
 
 # ---------------------------------------------------------------- bot
@@ -361,10 +463,17 @@ class Bot:
 
     def _account_or_warn(self, chat_id):
         acc = self.state.chat(chat_id)["account"]
-        if not acc or acc not in self.accounts:
-            self.api.send(chat_id, f"No account linked. Use /link <account> ({', '.join(self.accounts)})")
-            return None
-        return acc
+        if acc in self.accounts:
+            return acc
+        if len(self.accounts) == 1:  # nothing to choose: link the only account
+            acc = next(iter(self.accounts))
+            with self.state.lock:
+                self.state.chat(chat_id)["account"] = acc
+                self.state.save()
+            self.api.send(chat_id, f"🔗 This chat is linked to '{acc}'.")
+            return acc
+        self.api.send(chat_id, f"No account linked. Use /link <account> ({', '.join(self.accounts)})")
+        return None
 
     def cmd_new(self, chat_id, arg):
         acc = self._account_or_warn(chat_id)
@@ -479,10 +588,11 @@ class Bot:
             job = {"account": acc, "prompt": prompt, "started": time.time(), "proc": None,
                    "stopped": False}
             self.jobs[chat_id] = job
+        # Announce before starting, so a fast result can't arrive ahead of this message.
+        self.api.send(chat_id, f"⏳ Working on it ({acc})…")
         t = threading.Thread(target=self._run_job, args=(chat_id, job), daemon=True)
         job["thread"] = t
         t.start()
-        self.api.send(chat_id, f"⏳ Working on it ({acc})…")
 
     def build_command(self, account, session_id):
         acc = self.accounts[account]
@@ -496,12 +606,8 @@ class Bot:
         if acc.get("allowed_tools"):
             cmd += ["--allowedTools", ",".join(acc["allowed_tools"])]
         cmd += list(acc.get("extra_args", []))
-        env = os.environ.copy()
-        if acc.get("config_dir"):
-            env["CLAUDE_CONFIG_DIR"] = os.path.expanduser(acc["config_dir"])
-        env.update({k: str(v) for k, v in (acc.get("env") or {}).items()})
         cwd = os.path.expanduser(acc.get("workdir", "."))
-        return cmd, env, cwd
+        return cmd, account_env(acc), cwd
 
     def _run_job(self, chat_id, job):
         account = job["account"]
@@ -509,14 +615,18 @@ class Bot:
             session_id = self.state.session(chat_id, account)["session_id"]
             cmd, env, cwd = self.build_command(account, session_id)
             log.info("chat %s / %s: running %s", chat_id, account, cmd)
+            if not os.path.isdir(cwd):
+                self.api.send(chat_id, f"❌ The workdir for '{account}' doesn't exist: {cwd}")
+                return
             try:
                 # Prompt goes over stdin so text starting with "-" is never read as a flag.
                 proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         text=True, encoding="utf-8", errors="replace",
                                         **popen_kwargs())
-            except FileNotFoundError as e:
-                self.api.send(chat_id, f"❌ Could not start Claude: {e}")
+            except FileNotFoundError:
+                self.api.send(chat_id, "❌ Claude Code isn't installed on the PC. Double-click "
+                                       "start.bat there — it installs it.")
                 return
             job["proc"] = proc
             try:
@@ -533,7 +643,9 @@ class Bot:
             result = parse_claude_output(out)
             if result is None:
                 tail = (err or out or "").strip()[-1500:]
-                self.api.send(chat_id, f"❌ Claude exited with code {proc.returncode} ({account}).\n\n{tail}")
+                log.warning("chat %s / %s: claude exited %s: %s", chat_id, account, proc.returncode, tail)
+                hint = LOGIN_HINT if LOGIN_ERROR.search(tail) else ""
+                self.api.send(chat_id, f"❌ Claude exited with code {proc.returncode} ({account}).\n\n{tail}{hint}")
                 return
             self._record(chat_id, account, result)
             icon = "❌" if result.get("is_error") else "✅"
@@ -541,6 +653,12 @@ class Bot:
                       f"${float(result.get('total_cost_usd') or 0):.4f} · "
                       f"{result.get('num_turns', '?')} turns")
             body = result.get("result") or result.get("error") or f"(no text; subtype {result.get('subtype')})"
+            if result.get("is_error"):
+                log.warning("chat %s / %s: Claude reported an error: %s", chat_id, account, str(body)[:500])
+                if LOGIN_ERROR.search(str(body)):
+                    body = f"{body}{LOGIN_HINT}"
+            else:
+                log.info("chat %s / %s: done in %s", chat_id, account, fmt_duration(elapsed))
             self.api.send(chat_id, f"{header}\n\n{body}")
         except Exception as e:
             log.exception("job failed")
@@ -573,6 +691,30 @@ class Bot:
             if c.get("account"):
                 self.api.send(int(chat_id), text)
 
+    def check_claude(self):
+        """Log whether Claude Code is installed and signed in for each account."""
+        version = claude_version(self.claude_cmd)
+        if not version:
+            log.error("Claude Code was not found (%s). Double-click start.bat to install it.",
+                      self.claude_cmd[0])
+            return False
+        log.info("Claude Code %s at %s", version, self.claude_cmd[0])
+        ok = True
+        for name, acc in self.accounts.items():
+            signed_in, info = claude_auth_status(self.claude_cmd, account_env(acc))
+            if signed_in:
+                log.info("Account '%s': signed in (%s)", name, info.get("authMethod", "?"))
+            elif signed_in is False:
+                ok = False
+                log.error("Account '%s': Claude Code is NOT signed in. Double-click start.bat "
+                          "(or run: claude auth login).", name)
+            else:
+                log.warning("Account '%s': could not read sign-in status: %s", name, info)
+            workdir = os.path.expanduser(acc.get("workdir", "."))
+            if not os.path.isdir(workdir):
+                log.error("Account '%s': workdir does not exist: %s", name, workdir)
+        return ok
+
     def run_forever(self):
         try:
             self.api.set_commands(BOT_COMMANDS)
@@ -583,6 +725,19 @@ class Bot:
         while True:
             try:
                 updates = self.api.get_updates(offset)
+            except urllib.error.HTTPError as e:
+                if e.code == 401:
+                    log.error("Telegram rejected the bot token (401). Double-click start.bat "
+                              "to enter a new one.")
+                    raise SystemExit(2)
+                if e.code == 409:
+                    log.error("Another copy of this bot is running with the same token "
+                              "(Telegram 409 Conflict). Close it; retrying in 30s.")
+                    time.sleep(30)
+                else:
+                    log.warning("getUpdates failed: %s; retrying in 5s", e)
+                    time.sleep(5)
+                continue
             except Exception as e:
                 log.warning("getUpdates failed: %s; retrying in 5s", e)
                 time.sleep(5)
@@ -600,10 +755,12 @@ class Bot:
 
 
 def load_config(path):
-    cfg = json.loads(Path(path).read_text(encoding="utf-8"))
+    # utf-8-sig: Windows Notepad may save the file with a byte-order mark.
+    cfg = json.loads(Path(path).read_text(encoding="utf-8-sig"))
     cfg["telegram_bot_token"] = os.environ.get("TELEGRAM_BOT_TOKEN") or cfg.get("telegram_bot_token")
     if not cfg.get("telegram_bot_token") or "PASTE" in cfg["telegram_bot_token"]:
-        sys.exit("Set telegram_bot_token in config.json or TELEGRAM_BOT_TOKEN.")
+        sys.exit("Set telegram_bot_token in config.json or TELEGRAM_BOT_TOKEN "
+                 "(on Windows, double-click start.bat - it asks for it).")
     if not cfg.get("allowed_user_ids") and not cfg.get("allowed_usernames"):
         sys.exit("Nobody is allowed to use the bot. Add your Telegram @handle to allowed_usernames "
                  "(or your numeric id to allowed_user_ids) in config.json.")
@@ -612,14 +769,55 @@ def load_config(path):
     return cfg
 
 
-def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    cfg_path = sys.argv[1] if len(sys.argv) > 1 else "config.json"
-    cfg = load_config(cfg_path)
-    state = State(cfg.get("state_file", "state.json"))
-    bot = Bot(cfg, TelegramAPI(cfg["telegram_bot_token"]), state)
-    bot.run_forever()
+def setup_logging(log_file=None):
+    handlers = [logging.StreamHandler()]
+    if log_file:
+        handlers.append(logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=1_000_000, backupCount=2, encoding="utf-8"))
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        handlers=handlers, force=True)
+
+
+def start(cfg_path, cfg=None):
+    """Run the bot until it is stopped. Returns a process exit code."""
+    cfg_path = Path(cfg_path).resolve()
+    base = cfg_path.parent
+    setup_logging(base / "bot.log")
+    cfg = cfg or load_config(cfg_path)
+    lock = InstanceLock(base / "bot.lock")
+    if not lock.acquire():
+        log.error("The bot is already running in another window. Use that one, or close it first.")
+        return 3
+    try:
+        api = TelegramAPI(cfg["telegram_bot_token"])
+        try:
+            me = api.call("getMe")
+            log.info("Telegram bot @%s is online: https://t.me/%s", me.get("username"), me.get("username"))
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 404):
+                log.error("Telegram rejected the bot token. Double-click start.bat to enter a new one.")
+                return 2
+            log.warning("Could not reach Telegram yet (%s); will keep retrying.", e)
+        except Exception as e:
+            log.warning("Could not reach Telegram yet (%s); will keep retrying.", e)
+        state_file = Path(cfg.get("state_file", "state.json"))
+        state = State(state_file if state_file.is_absolute() else base / state_file)
+        bot = Bot(cfg, api, state)
+        bot.check_claude()
+        bot.run_forever()
+    except KeyboardInterrupt:
+        log.info("Stopped.")
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 1
+    finally:
+        lock.release()
+    return 0
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    return start(argv[0] if argv else "config.json")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

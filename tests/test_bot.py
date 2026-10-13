@@ -1,10 +1,12 @@
 """End-to-end tests with a fake Telegram API and a fake `claude` binary."""
+import json
 import os
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -168,6 +170,73 @@ class BotTest(unittest.TestCase):
         reloaded = botmod.State(self.state_path)
         self.assertEqual(reloaded.chat(CHAT_A)["account"], "work")
         self.assertEqual(reloaded.account_stats("work")["runs"], 1)
+
+    def test_single_account_autolinks(self):
+        cfg = dict(self.cfg, accounts={"main": self.cfg["accounts"]["personal"]})
+        b = botmod.Bot(cfg, self.api, botmod.State(Path(self.tmp.name) / "s1.json"))
+        self.bot = b
+        self.say("hello there")
+        self.wait()
+        msgs = [t for c, t in self.api.sent if c == CHAT_A]
+        self.assertIn("linked to 'main'", msgs[0])
+        self.assertTrue(msgs[-1].startswith("✅ main"), msgs[-1])
+
+    def test_login_error_gets_hint(self):
+        self.say("/link work")
+        self.say("LOGINNEEDED please")
+        self.wait()
+        last = self.api.last(CHAT_A)
+        self.assertIn("Please run /login", last)
+        self.assertIn("isn't signed in", last)
+
+    def test_missing_workdir_reported(self):
+        self.cfg["accounts"]["work"]["workdir"] = str(Path(self.tmp.name) / "nope")
+        self.say("/link work")
+        self.say("do it")
+        self.wait()
+        self.assertIn("doesn't exist", self.api.last(CHAT_A))
+
+    def test_claude_version_and_auth_status(self):
+        cmd = [sys.executable, FAKE]
+        self.assertEqual(botmod.claude_version(cmd), "9.9.9 (Claude Code)")
+        self.assertIsNone(botmod.claude_version([sys.executable, "-c", "print('hi')"]))
+        ok, info = botmod.claude_auth_status(cmd)
+        self.assertTrue(ok)
+        self.assertEqual(info["authMethod"], "oauth_token")
+        env = dict(os.environ, FAKE_LOGIN_MARKER=str(Path(self.tmp.name) / "marker"))
+        ok, _ = botmod.claude_auth_status(cmd, env)
+        self.assertFalse(ok)
+        ok, _ = botmod.claude_auth_status([str(Path(self.tmp.name) / "missing-binary")])
+        self.assertIsNone(ok)
+
+    def test_find_claude_in_install_folder(self):
+        home = Path(self.tmp.name) / "home"
+        bindir = home / ".local" / "bin"
+        bindir.mkdir(parents=True)
+        exe = bindir / ("claude.exe" if os.name == "nt" else "claude")
+        exe.write_text("")
+        empty = Path(self.tmp.name) / "emptypath"
+        empty.mkdir()
+        with mock.patch.dict(os.environ, {"PATH": str(empty), "HOME": str(home),
+                                          "USERPROFILE": str(home), "APPDATA": str(home)}):
+            self.assertEqual(Path(botmod.find_claude()), exe)
+            self.assertEqual(Path(botmod.resolve_bin("claude")), exe)
+            self.assertIsNone(botmod.find_claude("definitely-not-a-command-xyz"))
+
+    def test_instance_lock(self):
+        path = Path(self.tmp.name) / "bot.lock"
+        first, second = botmod.InstanceLock(path), botmod.InstanceLock(path)
+        self.assertTrue(first.acquire())
+        self.assertFalse(second.acquire())
+        first.release()
+        self.assertTrue(second.acquire())
+        second.release()
+
+    def test_config_with_bom(self):
+        path = Path(self.tmp.name) / "config.json"
+        path.write_text(json.dumps({"telegram_bot_token": "1:x", "allowed_usernames": ["a"],
+                                    "accounts": {"m": {}}}), encoding="utf-8-sig")
+        self.assertEqual(botmod.load_config(path)["accounts"], {"m": {}})
 
     def test_long_message_split(self):
         chunks = botmod.split_message("x\n" * 5000)
