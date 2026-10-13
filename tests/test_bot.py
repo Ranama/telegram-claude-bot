@@ -104,7 +104,7 @@ class BotTest(unittest.TestCase):
         self.assertIn(sid, self.api.last(CHAT_A))
 
     def test_two_chats_two_accounts_in_parallel(self):
-        os.environ["FAKE_SLEEP"] = "0.5"
+        os.environ["FAKE_SLEEP"] = "2"
         try:
             self.say("/link personal", chat=CHAT_A)
             self.say("/link work", chat=CHAT_B)
@@ -113,7 +113,7 @@ class BotTest(unittest.TestCase):
             self.say("task B", chat=CHAT_B)
             self.wait(CHAT_A)
             self.wait(CHAT_B)
-            self.assertLess(time.time() - t0, 1.0)  # ran concurrently
+            self.assertLess(time.time() - t0, 3.5)  # concurrently; serial would be >= 4s
         finally:
             os.environ.pop("FAKE_SLEEP")
         self.assertIn("prof-a", self.api.last(CHAT_A))

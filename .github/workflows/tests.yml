@@ -3,13 +3,28 @@ on: [push, pull_request]
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
         python: ["3.9", "3.12"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
-      - run: python tests/test_bot.py
+      - name: Run tests
+        shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          set +e
+          python tests/test_bot.py > test-output.txt 2>&1
+          code=$?
+          cat test-output.txt
+          if [ $code -ne 0 ]; then
+            # Surface the failure as an annotation so it is visible without opening logs.
+            msg=$(grep -E "^(FAIL|ERROR):|Error|assert|Traceback|File \"" test-output.txt | tail -25 | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')
+            echo "::error title=Tests failed::$msg"
+          fi
+          exit $code
