@@ -57,6 +57,36 @@ class StatusTest(TempDirTest):
         status.record_event(self.dir, self.ev("Stop", last_assistant_message="ok"), now=t + 5)
         status.record_event(self.dir, self.ev("UserPromptSubmit", prompt="x"), now=t)  # ran late
         self.assertFalse(status.lock_path(self.dir, "s1").exists())
+        self.assertEqual(self.state(t + 6), "completed")
+
+    def test_sessions_that_report_themselves(self):
+        """Cloud sessions have no hooks: they write status/sessions/<id>.json themselves."""
+        folder = self.dir / "status" / "sessions"
+        folder.mkdir(parents=True)
+        def report(name, age=0, **rec):
+            path = folder / f"{name}.json"
+            path.write_text(json.dumps(rec), encoding="utf-8")
+            os.utime(path, (time.time() - age, time.time() - age))
+        report("cloud-a", session_id="cloud-a", where="cloud", title="Telegram notifier",
+               project="telegram-claude-bot", account="me@x.com", state="working",
+               task="Make /status list running sessions")
+        report("cloud-b", where="cloud", title="Old chat", state="working", task="x", age=25 * 60)
+        report("cloud-c", title="Shop", state="done", summary="Deployed.", updated=time.time() * 1000)
+        report("cloud-d", title="Question", state="needs_input", detail="Which colour?", age=3 * 86400)
+        (folder / "broken.json").write_text("[1, 2]", encoding="utf-8")
+        (folder / "half.json").write_text('{"state": "work', encoding="utf-8")
+        report("bad-time", title="Bad", state="working", updated="soon")
+        items = {i["session_id"]: i for i in status.current(self.dir)}
+        self.assertEqual({k: i["state"] for k, i in items.items()},
+                         {"cloud-a": "working", "cloud-b": "stalled", "cloud-c": "completed",
+                          "cloud-d": "needs_input"})
+        text = status.status_text(list(items.values()))
+        self.assertIn("🟡 <b>Telegram notifier</b>\nWorking on: Make /status list running sessions\n"
+                      "<i>📁 telegram-claude-bot · ☁️ cloud · just now</i>", text)
+        self.assertIn("🟠 <b>Old chat</b>", text)
+        self.assertIn("🟢 <b>Shop</b>\nDone: Deployed.\n<i>just now</i>", text)  # ms → file time
+        self.assertIn("🔴 <b>Question</b>\nNeeds your input: Which colour?\n<i>3 d ago</i>", text)
+        self.assertIn("👤 me@x.com", text)
 
     def test_leftover_lock_is_cleaned_and_stalled_lock_shown(self):
         t = time.time()
@@ -96,12 +126,12 @@ class StatusTest(TempDirTest):
 
     def test_status_text_colours_wording_and_escaping(self):
         def item(state, **extra):
-            return dict({"state": state, "title": "T", "prompt": "", "detail": "", "summary": "",
+            return dict({"state": state, "title": "T", "task": "", "detail": "", "summary": "",
                          "project": "P", "account": "a@x.com", "ago": "just now"}, **extra)
         items = [item("needs_input", detail="Claude asks: Which DB? (Postgres, SQLite)"),
                  item("needs_approval", detail="Claude wants to run: npm test && deploy"),
                  item("needs_approval", detail="Claude wants you to approve its plan"),
-                 item("working", title="Fix <login>", prompt="can you please add tests for login.py?"),
+                 item("working", title="Fix <login>", task="can you please add tests for login.py?"),
                  item("stalled"), item("completed", summary="Done. I fixed it.", account="b@x.com"),
                  item("ended")]
         text = status.status_text(items)

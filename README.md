@@ -40,6 +40,10 @@ Done: I wrote README.md with setup steps.
 
 🔴 needs you (a question or an approval) · 🟡 working · 🟢 done · 🟠 no activity for 20+ min · ⚪ closed. Sessions are named by Claude Code's title, or by your first message cleaned up (file names instead of paths, no "can you please").
 
+Every session has one small status file, `status/sessions/<id>.json`: what it's working on, its state, title, folder and account. Claude Code sessions on your computer write theirs automatically (hooks). **Cloud sessions** (e.g. chats in the Claude app) can't run hooks on your computer; when they're linked to it, they write the file themselves. Tell them to, e.g. in your project's or personal instructions (with the path of your copy):
+
+> When you're linked to my computer: report your status for my Telegram /status as described in the "Cloud sessions" section of `D:\Claude\telegram-claude-bot\CLAUDE.md` — write your status file when you start a task, when you need me, and when you're done.
+
 Python 3.8+ standard library only. Windows, macOS, Linux.
 
 ## Set up
@@ -72,7 +76,7 @@ Claude Code [hooks](https://code.claude.com/docs/en/hooks) run `hook.py` on thes
 | Stop (Claude is done) | deleted | 🟢 completed | ✅ message |
 | SessionEnd | deleted | ⚪ closed | — |
 
-Lock files are `status/locks/<session>.lock`; the latest state per session is `status/sessions/<session>.json`. Approving something on the PC counts as working again once Claude continues; a lock without activity for 20 minutes shows as 🟠 inactive (e.g. after an interrupt).
+Lock files are `status/locks/<session>.lock`; the latest state per session is `status/sessions/<session>.json` (the same file cloud sessions write — see [CLAUDE.md](CLAUDE.md) for its format). Approving something on the PC counts as working again once Claude continues; a working session without activity for 20 minutes shows as 🟠 inactive (e.g. after an interrupt).
 
 Only your chat gets messages and answers (`chat_id` in `config.json`, git-ignored with the token).
 
@@ -84,7 +88,7 @@ Only your chat gets messages and answers (`chat_id` in `config.json`, git-ignore
 | `status.py` | Lock and status files, the `/status` list |
 | `tg.py` | Telegram API, `config.json` |
 | `install.py` | Setup / uninstall |
-| `bot.py` | Optional: answers `/status` |
+| `bot.py` | Answers `/status`; sends text files dropped into `outbox/` |
 | `start.bat` | Windows: setup if needed, then `bot.py` |
 | `CLAUDE.md` | Instructions for Claude |
 

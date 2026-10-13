@@ -1,12 +1,15 @@
 """
-Status of every Claude Code session on this computer, kept up to date by hook.py.
+Status of every Claude session: one small file per session, read by /status.
 
+  status/sessions/<session>.json  state, what it's working on, title, folder, account, summary
   status/locks/<session>.lock     exists while a command runs (created when you send
                                   Claude something, deleted when it's done)
-  status/sessions/<session>.json  latest state, account, folder, title and summary
+
+Claude Code sessions on this computer: hook.py keeps both up to date automatically.
+Cloud sessions (no hooks) write their status/sessions/<id>.json themselves — see CLAUDE.md.
 
 States: working, needs_input, needs_approval, completed, ended (closed), and stalled
-(a lock without any activity for 20 minutes, e.g. after an interrupt).
+(working, but no sign of life for 20 minutes, e.g. after an interrupt).
 """
 import html
 import json
@@ -36,6 +39,8 @@ STATES = {  # state: (emoji in notifications, label, order in lists)
     "completed": ("✅", "Completed", 4),
     "ended": ("⏹", "Closed", 5),
 }
+ALIASES = {"done": "completed", "complete": "completed", "finished": "completed", "running": "working",
+           "in_progress": "working", "busy": "working", "waiting": "needs_input", "closed": "ended"}
 
 
 # ---------------------------------------------------------------- small helpers
@@ -250,11 +255,11 @@ def record_event(base, event, now=None, config_dir=None):
         rec["title"] = title
 
     if name == "UserPromptSubmit":                  # a new command starts: lock
+        if rec.get("completed_at", 0) >= now:       # hooks may run late: never re-lock a finished one
+            return rec
         rec.update({"state": "working", "started": now, "detail": "",
-                    "prompt": one_line(event.get("prompt"), 160)})
-        if rec.get("completed_at", 0) < now:        # hooks may run late: never re-lock a finished one
-            write_json(lock_path(base, sid), {"session_id": sid, "started": now,
-                                              "prompt": rec["prompt"]})
+                    "task": one_line(event.get("prompt"), 160)})
+        write_json(lock_path(base, sid), {"session_id": sid, "started": now, "task": rec["task"]})
     elif name == "PermissionRequest":               # a question or an approval
         tool, args = event.get("tool_name"), event.get("tool_input") or {}
         if tool == "AskUserQuestion":
@@ -293,22 +298,27 @@ def _mtime(path):
         return 0
 
 
-def derive_state(base, rec, now=None):
-    """The state to show now, using the lock file and the transcript's activity."""
+def derive_state(base, rec, now=None, file_time=0):
+    """The state to show now. Hook sessions: from the lock file and the transcript's activity.
+    Sessions that report themselves (no lock): the state in their file."""
     now = now or time.time()
     lock = read_json(lock_path(base, rec["session_id"]))
-    state = rec.get("state") or "completed"
-    activity = max(_mtime(rec.get("transcript_path")), rec.get("updated", 0))
+    state = str(rec.get("state") or "completed").strip().lower().replace(" ", "_")
+    state = ALIASES.get(state, state if state in STATES else "working")
+    updated = float(rec.get("updated") or 0) or file_time
+    if updated > now + 60:                           # a wrong clock or milliseconds: use the file's time
+        updated = file_time
+    activity = max(_mtime(rec.get("transcript_path")), updated)
     if lock and lock.get("started", 0) > rec.get("completed_at", 0):
         if state in ("needs_input", "needs_approval"):
             if _mtime(rec.get("transcript_path")) > rec.get("asked_at", 0) + 2:
                 state = "working"                    # answered on the PC: Claude went on
         else:
             state = "working"
-        if state == "working" and now - activity > STALLED_SECONDS:
-            state = "stalled"
     elif lock:
         remove(lock_path(base, rec["session_id"]))   # left over from a finished command
+    if state == "working" and now - activity > STALLED_SECONDS:
+        state = "stalled"                            # no sign of life for 20 minutes
     return state, activity
 
 
@@ -319,18 +329,20 @@ def current(base, now=None, hours=LIST_HOURS):
     items = []
     for path in (folder.glob("*.json") if folder.is_dir() else []):
         rec = read_json(path)
-        if not rec.get("session_id"):
+        if not isinstance(rec, dict) or not rec.get("state"):   # broken or half-written
             continue
-        state, activity = derive_state(base, rec, now)
+        rec["session_id"] = str(rec.get("session_id") or path.stem)
+        try:
+            state, activity = derive_state(base, rec, now, _mtime(path))
+        except (TypeError, ValueError, AttributeError):  # a broken file
+            continue
         if now - activity > hours * 3600 and state not in ("working", "needs_input", "needs_approval"):
             continue
-        items.append({"state": state, "order": STATES.get(state, STATES["completed"])[2],
-                      "activity": activity, "ago": ago(now - activity),
-                      "project": rec.get("project") or "?", "account": rec.get("account") or "?",
-                      "title": rec.get("title") or readable_title(rec.get("prompt")) or "Untitled session",
-                      "prompt": rec.get("prompt") or "",
-                      "detail": rec.get("detail") or "", "summary": rec.get("summary") or "",
-                      "session_id": rec["session_id"]})
+        text = {key: one_line(rec.get(key), 300) for key in
+                ("project", "account", "title", "task", "detail", "summary", "where")}
+        text["title"] = text["title"] or readable_title(text["task"]) or "Untitled session"
+        items.append(dict(text, state=state, order=STATES[state][2], activity=activity,
+                          ago=ago(now - activity), session_id=rec["session_id"]))
     items.sort(key=lambda i: (i["order"], -i["activity"]))
     return items
 
@@ -351,7 +363,7 @@ def _what(item):
         what = "Needs your input" if state == "needs_input" else "Needs your approval"
         return f"{what}: {detail}" if detail else what
     if state == "working":
-        task = readable_title(item.get("prompt"), 80)
+        task = readable_title(item.get("task"), 80)
         return f"Working on: {task}" if task and task != item.get("title") else "Working on it…"
     if state == "stalled":
         return "No activity for 20+ min — interrupted or stuck?"
@@ -366,14 +378,18 @@ def status_text(items, limit=15, now=None):
     esc = lambda t: html.escape(str(t), quote=False)  # noqa: E731
     clock = time.strftime("%H:%M:%S", time.localtime(now or time.time()))
     if not items:
-        return f"📋 <b>Claude sessions</b>\nNo sessions in the last {LIST_HOURS} hours.\n\n🕒 Updated {clock}"
-    accounts = sorted({i["account"] for i in items})
+        return (f"📋 <b>Claude sessions</b>\nNo sessions in the last {LIST_HOURS} hours.\n"
+                "Claude Code sessions on this computer show up by themselves; cloud sessions "
+                f"once they write their status file (see CLAUDE.md).\n\n🕒 Updated {clock}")
+    accounts = sorted({i["account"] for i in items if i.get("account")})
     lines = ["📋 <b>Claude sessions</b>"] + ([f"👤 {esc(accounts[0])}"] if len(accounts) == 1 else [])
     lines.append(" · ".join(f"{icon} {n} {one if n == 1 else several}"
                             for icon, one, several, states in GROUPS
                             for n in [sum(i["state"] in states for i in items)] if n))
     for item in items[:limit]:
-        where = [f"📁 {esc(item['project'])}"] + ([f"👤 {esc(item['account'])}"] if len(accounts) > 1 else [])
+        where = ([f"📁 {esc(item['project'])}"] if item.get("project") else []) + (
+            ["☁️ cloud"] if item.get("where") == "cloud" else []) + (
+            [f"👤 {esc(item['account'])}"] if len(accounts) > 1 and item.get("account") else [])
         lines += ["",
                   f"{COLORS.get(item['state'], '⚪')} <b>{esc(one_line(item['title'], 60))}</b>",
                   esc(one_line(_what(item), 120)),

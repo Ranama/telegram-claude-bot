@@ -3,7 +3,8 @@
 This repo makes every Claude Code session on this computer message the user on Telegram:
 ✅ when a task is done (one-line summary), ❓ when Claude needs input, 🔐 when it needs
 approval — each with the session (folder + title) and the Claude account. It also keeps a
-lock/status file per session, which `/status` in Telegram lists.
+status file per session (`status/sessions/<id>.json`), which `/status` in Telegram lists:
+🔴 needs you, 🟡 working, 🟢 done.
 
 ## When the user asks you to set this up ("use this", "turn on Telegram notifications")
 
@@ -30,8 +31,33 @@ ask something. If the user must do something outside Claude Code before you can 
 (log in somewhere, plug in a device, approve a payment), also tell them directly:
 `python <this folder>/hook.py send "What you need them to do"`.
 
+## Cloud sessions: report your status yourself
+
+The hooks only run for Claude Code sessions on this computer. If you run in the cloud but can
+write files on this computer (through its link to the Claude desktop app), `/status` only sees
+you if you write your own status file: `status/sessions/<id>.json` in this folder. Choose the
+id once per conversation (e.g. `cloud-` + your session id) and overwrite the same file each
+time — never delete it:
+
+    {"session_id": "<id>", "where": "cloud", "title": "<short name of this conversation>",
+     "project": "<repo or folder you work in>", "account": "<the user's Claude account email>",
+     "state": "working", "task": "<what you're doing right now, one line>",
+     "detail": "", "summary": ""}
+
+- When you start a task: `"state": "working"` and the `task`.
+- When you need the user: `"state": "needs_input"` (or `"needs_approval"`), the question in `detail`.
+- When you're done: `"state": "completed"` and one short line in `summary`.
+
+A `working` file that hasn't changed for 20 minutes shows as 🟠 inactive. When you're done or
+need the user, also write a text file to `outbox/` here; the running bot sends it to Telegram
+and deletes it. Use this format:
+
+    ✅ Completed — <project> · “<title>”      (or ❓ Needs input — …)
+    👤 <account>
+    <one short line>
+
 ## Files
 
-`hook.py` (the hook), `status.py` (lock + status files), `tg.py` (Telegram API),
-`install.py` (setup), `bot.py` (optional, answers /status), `start.bat` (Windows: setup + bot).
+`hook.py` (the hook), `status.py` (status + lock files, the /status list), `tg.py` (Telegram API),
+`install.py` (setup), `bot.py` (answers /status, sends outbox/), `start.bat` (Windows: setup + bot).
 Tests: `python -m unittest discover tests`.

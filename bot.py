@@ -8,6 +8,7 @@ Windows) when you want /status. It only answers your own chat (chat_id in config
 
 It also sends any text file dropped into the outbox/ folder to you, then deletes it.
 """
+import importlib
 import logging
 import os
 import sys
@@ -33,6 +34,10 @@ class Bot:
         self.token, self.chat_id = cfg["telegram_bot_token"], int(cfg["chat_id"])
 
     def status_text(self):
+        try:
+            importlib.reload(status)  # an updated status.py works without restarting the bot
+        except Exception as e:
+            log.warning("status.py: %s", e)
         return status.status_text(status.current(self.base))
 
     def handle(self, update):
