@@ -119,6 +119,9 @@ def main():
         handle(json.loads(raw) if raw.strip() else {})
     except Exception:
         log.exception("notify failed")
+    finally:
+        log.removeHandler(handler)
+        handler.close()
     return 0
 
 
