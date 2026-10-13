@@ -160,8 +160,20 @@ def kill_tree(proc):
 
 
 def resolve_bin(name):
-    """On Windows `claude` is claude.cmd; Popen needs the full path to find it."""
-    return shutil.which(os.path.expanduser(name)) or name
+    """Find the Claude Code executable.
+
+    Popen needs a full path on Windows, and the native installer's folder
+    (~/.local/bin) is often not on PATH until a new terminal is opened.
+    """
+    found = shutil.which(os.path.expanduser(name))
+    if found:
+        return found
+    if name == "claude":
+        for candidate in ("~/.local/bin/claude.exe", "~/.local/bin/claude"):
+            path = os.path.expanduser(candidate)
+            if os.path.isfile(path):
+                return path
+    return name
 
 
 # ---------------------------------------------------------------- telegram

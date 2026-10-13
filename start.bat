@@ -11,12 +11,19 @@ if errorlevel 1 (
   pause & exit /b 1
 )
 
+rem Claude Code: on PATH, or in the native installer's default folder.
 where claude >nul 2>nul
 if errorlevel 1 (
-  echo [X] Claude Code is not installed.
-  echo     Open PowerShell and run:  irm https://claude.ai/install.ps1 ^| iex
-  echo     Then run "claude" once and log in, close it, and run start.bat again.
-  pause & exit /b 1
+  if exist "%USERPROFILE%\.local\bin\claude.exe" (
+    set "PATH=%USERPROFILE%\.local\bin;%PATH%"
+  ) else (
+    echo [X] Claude Code is not installed. The Claude desktop app does not include it.
+    echo     1. Open PowerShell and run:  irm https://claude.ai/install.ps1 ^| iex
+    echo     2. Open a NEW PowerShell window and run:  claude
+    echo        Log in in the browser when asked, then type /exit
+    echo     3. Run start.bat again.
+    pause & exit /b 1
+  )
 )
 
 if not exist config.json (
