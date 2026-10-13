@@ -2,7 +2,41 @@
 
 [![tests](https://github.com/Ranama/telegram-claude-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/Ranama/telegram-claude-bot/actions/workflows/tests.yml)
 
-Every Claude Code session on your computer messages you on Telegram when it's done or needs you:
+Every Claude session on your computer messages you on Telegram when it's done or needs you, and `/status` shows what each one is doing.
+
+## Quick start
+
+**Install on a new machine** (Python 3.8+ and git; on Windows you can double-click `start.bat` instead of the last line):
+
+```bash
+git clone https://github.com/Ranama/telegram-claude-bot
+cd telegram-claude-bot
+python install.py
+```
+
+…or paste this into Claude Code and it does it for you:
+
+```text
+Clone https://github.com/Ranama/telegram-claude-bot and set up the Telegram notifications as its CLAUDE.md describes.
+```
+
+**Add a new session.** Claude Code sessions on that computer need nothing — they report automatically. For a **cloud session** (a chat in the Claude app, linked to your computer), paste this as its first message or into your project/personal instructions (change the path to where you cloned the repo):
+
+```text
+When you're linked to my computer: report your status for my Telegram /status as described in the "Cloud sessions" section of D:\Claude\telegram-claude-bot\CLAUDE.md — write your status file when you start a task, when you need me, and when you're done.
+```
+
+**Add another Claude account** on the same computer (its own `CLAUDE_CONFIG_DIR` folder):
+
+```bash
+python install.py --profile "<path to that account's Claude folder>"
+```
+
+Then keep the bot running for `/status`: `python bot.py` (Windows: `start.bat`).
+
+## What you get
+
+Messages look like this:
 
 ```
 ✅ Completed — VineTrip · “Login bug fix”
