@@ -1,0 +1,11 @@
+# Secrets and runtime state - never commit
+config.json
+state.json
+state.tmp
+*.log
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
