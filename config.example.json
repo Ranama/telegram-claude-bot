@@ -1,8 +1,9 @@
 {
   "telegram_bot_token": "PASTE-TOKEN-FROM-BOTFATHER",
-  "allowed_user_ids": [
-    123456789
+  "allowed_usernames": [
+    "YourTelegramHandle"
   ],
+  "allowed_user_ids": [],
   "allowed_chat_ids": [],
   "claude_bin": "claude",
   "job_timeout_seconds": 3600,

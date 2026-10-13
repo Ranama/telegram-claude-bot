@@ -23,9 +23,9 @@ Python 3.9+ standard library only — nothing to `pip install`.
    On Windows (PowerShell): `$env:CLAUDE_CONFIG_DIR="$HOME\.claude-work"; claude`
    (Leave out `config_dir` for an account to use your normal `~/.claude` login.)
 3. **Configure**: `cp config.example.json config.json`, paste the token, and set up `accounts`.
-4. **Find your Telegram user id**: run the bot, message it `/whoami`, put the number in `allowed_user_ids`, restart.
+4. **Allow yourself**: put your Telegram handle (without `@`) in `allowed_usernames`. The first time you message the bot, your numeric id is pinned to that handle in `state.json`, so someone who later takes the handle can't use the bot. (Alternatively put numeric ids from `/whoami` in `allowed_user_ids`.)
 5. **Run**: `python3 bot.py config.json` (keep it running with `tmux`, `systemd`, or `launchd`).
-   **Windows**: double-click `start.bat`. The first run creates `config.json` and opens it in Notepad.
+   **Windows**: double-click `start.bat`. It checks Python and Claude Code are installed, creates `config.json`, and opens it in Notepad if the token is missing.
 6. In Telegram: `/link personal`, then just type what you want done.
 
 ## Commands
@@ -56,7 +56,7 @@ Python 3.9+ standard library only — nothing to `pip install`.
 | `extra_args` | Any other `claude` CLI flags |
 | `env` | Extra environment variables (e.g. `ANTHROPIC_API_KEY` for an API-key account) |
 
-Top level: `allowed_user_ids` (required), `allowed_chat_ids` (optional extra lock), `job_timeout_seconds`, `state_file`, `claude_bin` (a command name/path, or a list such as `["node", "C:/path/to/cli.js"]`).
+Top level: `allowed_usernames` and/or `allowed_user_ids` (at least one), `allowed_chat_ids` (optional extra lock), `job_timeout_seconds`, `state_file`, `claude_bin` (a command name/path, or a list such as `["node", "C:/path/to/cli.js"]`).
 
 ## Notes and limits of this first version
 

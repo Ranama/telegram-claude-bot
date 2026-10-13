@@ -244,6 +244,10 @@ class Bot:
         self.state = state
         self.accounts = config["accounts"]
         self.allowed_users = {int(u) for u in config.get("allowed_user_ids", [])}
+        # Telegram handles (without @). The first user id seen for a handle is pinned in
+        # state.json, so someone who later takes over the handle is still rejected.
+        self.allowed_usernames = {str(u).lstrip("@").lower()
+                                  for u in config.get("allowed_usernames", [])}
         self.allowed_chats = {int(c) for c in config.get("allowed_chat_ids", [])}
         claude_bin = config.get("claude_bin", "claude")
         # A string ("claude" or a path) or a list, e.g. ["node", "C:/path/cli.js"].
@@ -255,8 +259,23 @@ class Bot:
 
     # ----- auth
 
-    def authorized(self, user_id, chat_id):
-        if user_id not in self.allowed_users:
+    def user_allowed(self, user_id, username):
+        if user_id in self.allowed_users:
+            return True
+        uname = (username or "").lower()
+        if not uname or uname not in self.allowed_usernames:
+            return False
+        with self.state.lock:
+            pinned = self.state.data.setdefault("pinned_users", {})
+            if uname not in pinned:
+                pinned[uname] = user_id
+                self.state.save()
+                log.info("Pinned @%s to Telegram user id %s", uname, user_id)
+                return True
+        return pinned[uname] == user_id
+
+    def authorized(self, user_id, chat_id, username=None):
+        if not self.user_allowed(user_id, username):
             return False
         if self.allowed_chats and chat_id not in self.allowed_chats:
             return False
@@ -279,11 +298,12 @@ class Bot:
         if cmd == "/whoami":
             self.api.send(chat_id, f"Your Telegram user id: {user_id}\nThis chat id: {chat_id}")
             return
-        if not self.authorized(user_id, chat_id):
+        if not self.authorized(user_id, chat_id, user.get("username")):
             log.warning("Rejected message from user %s in chat %s", user_id, chat_id)
             if cmd == "/start":
                 self.api.send(chat_id, f"Not authorized. Your Telegram user id is {user_id} — "
-                                       "add it to allowed_user_ids in config.json.")
+                                       "add it to allowed_user_ids (or your @handle to "
+                                       "allowed_usernames) in config.json.")
             return
 
         handlers = {
@@ -572,8 +592,9 @@ def load_config(path):
     cfg["telegram_bot_token"] = os.environ.get("TELEGRAM_BOT_TOKEN") or cfg.get("telegram_bot_token")
     if not cfg.get("telegram_bot_token") or "PASTE" in cfg["telegram_bot_token"]:
         sys.exit("Set telegram_bot_token in config.json or TELEGRAM_BOT_TOKEN.")
-    if not cfg.get("allowed_user_ids"):
-        sys.exit("allowed_user_ids is empty — nobody could use the bot. Add your Telegram user id.")
+    if not cfg.get("allowed_user_ids") and not cfg.get("allowed_usernames"):
+        sys.exit("Nobody is allowed to use the bot. Add your Telegram @handle to allowed_usernames "
+                 "(or your numeric id to allowed_user_ids) in config.json.")
     if not cfg.get("accounts"):
         sys.exit("Define at least one entry under accounts.")
     return cfg

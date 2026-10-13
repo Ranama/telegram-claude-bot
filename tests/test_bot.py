@@ -48,10 +48,13 @@ class BotTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def say(self, text, chat=CHAT_A, user=ME):
+    def say(self, text, chat=CHAT_A, user=ME, username=None):
         self.uid += 1
+        sender = {"id": user}
+        if username:
+            sender["username"] = username
         self.bot.handle_update({"update_id": self.uid, "message": {
-            "chat": {"id": chat}, "from": {"id": user}, "text": text}})
+            "chat": {"id": chat}, "from": sender, "text": text}})
 
     def wait(self, chat=CHAT_A):
         for _ in range(200):
@@ -68,6 +71,17 @@ class BotTest(unittest.TestCase):
         self.assertIn("Not authorized", self.api.last(CHAT_A))
         self.say("/whoami", user=STRANGER)
         self.assertIn(str(STRANGER), self.api.last(CHAT_A))
+
+    def test_username_allowed_and_pinned(self):
+        self.bot.allowed_usernames = {"ranama95"}
+        self.say("/accounts", user=4242, username="Ranama95")
+        self.assertIn("Accounts", self.api.last(CHAT_A))
+        self.assertEqual(self.bot.state.data["pinned_users"]["ranama95"], 4242)
+        n = len(self.api.sent)
+        self.say("/accounts", user=777, username="Ranama95")   # handle taken over
+        self.assertEqual(len(self.api.sent), n)
+        self.say("/accounts", user=888, username="someoneelse")
+        self.assertEqual(len(self.api.sent), n)
 
     def test_requires_link(self):
         self.say("do something")
