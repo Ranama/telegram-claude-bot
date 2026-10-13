@@ -86,6 +86,10 @@ class InstallTest(TempDirTest):
         code, out = self.run_install("--if-needed")
         self.assertEqual(code, 0, out)
         self.assertEqual(json.loads(self.config.read_text()), {"telegram_bot_token": TOKEN, "chat_id": CHAT})
+        self.assertIn("set up", self.tg.sent[-1]["text"])      # confirms the switch
+        self.tg.sent.clear()
+        self.run_install("--if-needed")
+        self.assertEqual(self.tg.sent, [])                     # later runs stay quiet
 
     def test_no_token_non_interactive(self):
         code, out = self.run_install()

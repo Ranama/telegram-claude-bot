@@ -182,7 +182,9 @@ def main(argv=None):
     p.add_argument("--uninstall", action="store_true", help="remove the hooks")
     args = p.parse_args(argv)
 
-    cfg = migrate_old_config(tg.load_config())
+    raw = tg.load_config()
+    cfg = migrate_old_config(raw)
+    migrated = bool(cfg.get("chat_id")) and not raw.get("chat_id")  # from an earlier version
     try:
         if args.uninstall:
             for folder in profiles(cfg, args.profile):
@@ -193,7 +195,7 @@ def main(argv=None):
             return 0
         token, me = get_token(cfg, args.token, interactive=sys.stdin.isatty())
         cfg["telegram_bot_token"] = token
-        new_chat = False
+        new_chat = migrated
         if args.chat_id:
             cfg["chat_id"], new_chat = args.chat_id, True
         elif not cfg.get("chat_id"):
