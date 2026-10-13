@@ -17,6 +17,17 @@ Python 3.8+ standard library only — nothing to `pip install`.
 
 Keep the window open — closing it stops the bot. Next time, `start.bat` skips the steps that are already done and starts the bot straight away. Everything is logged to `setup.log` and `bot.log` in this folder (the token is never logged).
 
+## Messages from your own Claude Code sessions
+
+`start.bat` asks once: *"Should Claude Code sessions you run on this PC message you on Telegram?"* If you say yes, it adds two [hooks](https://code.claude.com/docs/en/hooks) to your Claude Code settings (`~/.claude/settings.json`, with a backup next to it). From then on, every Claude Code session on the PC — the desktop app's Code tab or the terminal — messages you when it:
+
+- **finishes** (✅ with Claude's last message), or
+- **waits for you** (❓ waiting for your input, 🔐 needs permission — approve that one on the PC).
+
+**Reply to the message** in Telegram and the bot continues that session with your answer (in the session's own folder and Claude profile); reply to the bot's answer to keep going. `/reply <text>` answers the most recent one. `/notify off` / `/notify on` pauses and resumes these messages; `python setup_bot.py --remove-hooks` removes the hooks. Sessions that are already open pick the hooks up after you restart them.
+
+Note: a reply runs as a separate Claude Code process. If the desktop app still has that session open, it shows the new turns after you reopen the session.
+
 ## Quick start (macOS / Linux)
 
 ```bash
@@ -45,6 +56,8 @@ or set up `config.json` by hand (see below) and run `python3 bot.py config.json`
 | `/status` | Account, session, workdir, and what's running |
 | `/usage` | Runs, turns, cost, tokens, context fill % and models — for the session and the account |
 | `/stop` | Stop the running job |
+| `/notify on\|off` | Messages from your own Claude Code sessions on the PC |
+| `/reply <text>` | Answer the latest PC session that messaged you (or just reply to its message) |
 | `/whoami` | Show your Telegram user id (works for anyone) |
 
 ## More Claude accounts
@@ -89,12 +102,13 @@ Per account:
 | `start.bat` | Windows: double-click to set up and start |
 | `setup_bot.py` | The setup steps (install/sign in Claude Code, bot token), then starts the bot |
 | `bot.py` | The bot |
+| `notify.py` | Claude Code hook: messages you when a PC session finishes or waits |
 | `config.example.json` | Config template — `config.json` is created from it (git-ignored) |
 | `tests/` | Tests with a fake Telegram and a fake `claude` |
 
 ## Tests
 
-`python tests/test_bot.py` and `python tests/test_setup.py` — run on Linux and Windows, Python 3.9+ (also in GitHub Actions on every push).
+`python tests/test_bot.py`, `python tests/test_setup.py` and `python tests/test_notify.py` — run on Linux and Windows, Python 3.9+ (also in GitHub Actions on every push).
 
 ## License
 

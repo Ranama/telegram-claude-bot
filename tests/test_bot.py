@@ -50,13 +50,15 @@ class BotTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def say(self, text, chat=CHAT_A, user=ME, username=None):
+    def say(self, text, chat=CHAT_A, user=ME, username=None, reply_to=None):
         self.uid += 1
         sender = {"id": user}
         if username:
             sender["username"] = username
-        self.bot.handle_update({"update_id": self.uid, "message": {
-            "chat": {"id": chat}, "from": sender, "text": text}})
+        msg = {"chat": {"id": chat}, "from": sender, "text": text}
+        if reply_to:
+            msg["reply_to_message"] = {"message_id": reply_to}
+        self.bot.handle_update({"update_id": self.uid, "message": msg})
 
     def wait(self, chat=CHAT_A):
         for _ in range(200):
@@ -237,6 +239,44 @@ class BotTest(unittest.TestCase):
         path.write_text(json.dumps({"telegram_bot_token": "1:x", "allowed_usernames": ["a"],
                                     "accounts": {"m": {}}}), encoding="utf-8-sig")
         self.assertEqual(botmod.load_config(path)["accounts"], {"m": {}})
+
+    def test_reply_to_pc_session_notification_continues_it(self):
+        base = Path(self.tmp.name)
+        botmod.hook_session_remember(base, CHAT_A, 77, {"session_id": "pc-sess",
+                                                        "cwd": str(base / "wb"), "config_dir": None})
+        self.say("yes, go ahead", reply_to=77)
+        self.wait()
+        last = self.api.last(CHAT_A)
+        self.assertIn("--resume pc-sess", last)
+        self.assertIn("Did: yes, go ahead", last)
+        self.assertIn(f"cwd={base / 'wb'}", last)
+        self.assertIn("Reply to this message to continue", last)
+        self.assertIn("profile=None", last)  # the PC session's own (default) Claude profile
+
+    def test_reply_command_and_unknown_reply(self):
+        self.say("/reply hi")
+        self.assertIn("No Claude Code session", self.api.last(CHAT_A))
+        botmod.hook_session_remember(Path(self.tmp.name), CHAT_A, 5, {"session_id": "last-one",
+                                                                      "cwd": str(Path(self.tmp.name) / "wa")})
+        self.say("/reply continue please")
+        self.wait()
+        self.assertIn("--resume last-one", self.api.last(CHAT_A))
+        self.say("/link work")
+        self.say("normal message", reply_to=999)  # reply to an unrelated message: normal job
+        self.wait()
+        self.assertIn("resumed=False", self.api.last(CHAT_A))
+
+    def test_bot_runs_are_marked_for_the_hook(self):
+        _, env, _ = self.bot.build_command("work", None)
+        self.assertEqual(env[botmod.BOT_ENV_FLAG], "1")
+
+    def test_notify_command(self):
+        self.say("/notify off")
+        self.assertIn("OFF", self.api.last(CHAT_A))
+        self.say("/notify")
+        self.assertIn("OFF", self.api.last(CHAT_A))
+        self.say("/notify on")
+        self.assertIn("ON", self.api.last(CHAT_A))
 
     def test_long_message_split(self):
         chunks = botmod.split_message("x\n" * 5000)

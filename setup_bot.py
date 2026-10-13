@@ -231,10 +231,130 @@ def load_or_create_config(path):
     return cfg
 
 
+# ---------------------------------------------------------------- 4. notifications (hooks)
+
+NOTIFY_SCRIPT = HERE / "notify.py"
+NOTIFY_MATCHER = "permission_prompt|idle_prompt|agent_needs_input|elicitation_dialog"
+HOOK_EVENTS = ("Stop", "Notification")
+
+
+def hook_handler(python=None, script=NOTIFY_SCRIPT, windows=None):
+    """The hook entry that runs notify.py (no console window on Windows)."""
+    windows = bot.IS_WINDOWS if windows is None else windows
+    python = Path(python or sys.executable)
+    if windows:
+        pythonw = python.with_name("pythonw.exe")
+        exe = pythonw if pythonw.exists() else python
+        quote = lambda p: "'" + str(p).replace("'", "''") + "'"  # noqa: E731
+        return {"type": "command", "shell": "powershell", "timeout": 20,
+                "command": f"& {quote(exe)} {quote(script)}"}
+    import shlex
+    return {"type": "command", "timeout": 20,
+            "command": f"{shlex.quote(str(python))} {shlex.quote(str(script))}"}
+
+
+def _is_ours(handler):
+    """A hook this bot installed (also from an older copy of the folder)."""
+    command = str(handler.get("command", "")).replace("\\", "/")
+    return "notify.py" in command and (
+        "telegram-claude-bot" in command or str(NOTIFY_SCRIPT).replace("\\", "/") in command)
+
+
+def _without_ours(groups):
+    kept = []
+    for group in groups or []:
+        hooks = [h for h in group.get("hooks", []) if not _is_ours(h)]
+        if hooks:
+            kept.append(dict(group, hooks=hooks))
+    return kept
+
+
+def settings_files(accounts):
+    """Claude Code settings.json for the default profile and every account's profile."""
+    dirs = [Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")]
+    for acc in accounts.values():
+        if acc.get("config_dir"):
+            dirs.append(Path(os.path.expanduser(acc["config_dir"])))
+    seen, files = set(), []
+    for d in dirs:
+        key = os.path.normcase(str(d.resolve()))
+        if key not in seen:
+            seen.add(key)
+            files.append(d / "settings.json")
+    return files
+
+
+def update_hooks(settings_path, handler=None):
+    """Add (handler given) or remove (handler None) our hooks. Keeps other settings/hooks."""
+    settings_path = Path(settings_path)
+    settings = {}
+    if settings_path.exists():
+        raw = settings_path.read_text(encoding="utf-8-sig")
+        try:
+            settings = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError as e:
+            raise SetupError(f"{settings_path} isn't valid JSON ({e}); not changing it.")
+        backup = settings_path.with_name("settings.json.before-telegram-bot")
+        if not backup.exists():
+            backup.write_text(raw, encoding="utf-8")
+    hooks = settings.setdefault("hooks", {})
+    for event in HOOK_EVENTS:
+        groups = _without_ours(hooks.get(event))
+        if handler:
+            group = {"hooks": [handler]}
+            if event == "Notification":
+                group = {"matcher": NOTIFY_MATCHER, "hooks": [handler]}
+            groups.append(group)
+        if groups:
+            hooks[event] = groups
+        else:
+            hooks.pop(event, None)
+    if not hooks:
+        settings.pop("hooks")
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = settings_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, settings_path)
+
+
+def ensure_notifications(cfg, ask=None):
+    """Ask once whether PC sessions should message you; install/refresh the hooks."""
+    ask = ask or input
+    if cfg.get("notify_hooks") is None:
+        say("    Should Claude Code sessions you run on this PC (desktop app or terminal)")
+        say("    message you on Telegram when they finish or wait for you? You can reply")
+        say("    to those messages to continue the session.")
+        answer = (ask("    Turn this on? [Y/n]: ") or "y").strip().lower()
+        cfg["notify_hooks"] = not answer.startswith("n")
+    files = settings_files(cfg["accounts"])
+    handler = hook_handler() if cfg["notify_hooks"] else None
+    for path in files:
+        try:
+            update_hooks(path, handler)
+        except (SetupError, OSError) as e:
+            say(f"    Couldn't update {path}: {e}")
+            continue
+        log.info("hooks %s in %s", "installed" if handler else "removed", path)
+    if handler:
+        say("    On: finished or waiting sessions will message you. (/notify off to pause)")
+        say("    Sessions that are already open pick this up after a restart of the app.")
+    else:
+        say("    Off. (Set \"notify_hooks\": true in config.json and run start.bat to turn on.)")
+
+
 # ---------------------------------------------------------------- main
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "--remove-hooks":
+        cfg = load_or_create_config(HERE / "config.json")
+        for path in settings_files(cfg["accounts"]):
+            if path.exists():
+                update_hooks(path, None)
+                print(f"Removed the Telegram hooks from {path}")
+        cfg["notify_hooks"] = False
+        save_config(HERE / "config.json", cfg)
+        return 0
     cfg_path = Path(argv[0] if argv else HERE / "config.json").resolve()
     log_path = cfg_path.parent / "setup.log"
     open_log(log_path)
@@ -244,13 +364,16 @@ def main(argv=None):
     say("=======================")
     try:
         cfg = load_or_create_config(cfg_path)
-        say("[1/4] Claude Code")
+        say("[1/5] Claude Code")
         claude_cmd = ensure_claude()
-        say("[2/4] Claude sign-in")
+        say("[2/5] Claude sign-in")
         ensure_signed_in(claude_cmd, cfg["accounts"])
-        say("[3/4] Telegram")
+        say("[3/5] Telegram")
         me = ensure_token(cfg)
         ensure_users(cfg)
+        save_config(cfg_path, cfg)
+        say("[4/5] Notifications from your Claude Code sessions")
+        ensure_notifications(cfg)
         save_config(cfg_path, cfg)
     except SetupError as e:
         say("")
@@ -262,7 +385,7 @@ def main(argv=None):
         return 130
 
     username = me.get("username")
-    say("[4/4] Starting the bot")
+    say("[5/5] Starting the bot")
     say("")
     say(f"    Your bot: https://t.me/{username}")
     say(f"    Open @{username} in Telegram and send it a message, e.g.: hello")

@@ -42,7 +42,12 @@ Just send a message → it goes to Claude, continuing the current session.
 /status – what is running right now
 /usage – tokens, cost & turns for this session and account
 /stop – stop the running job
-/whoami – show your Telegram user id"""
+/notify on|off – messages from your own Claude Code sessions on the PC
+/reply <text> – answer the last session that messaged you
+/whoami – show your Telegram user id
+
+When a Claude Code session on the PC (desktop app or terminal) finishes or waits
+for you, you get a message here: reply to it to continue that session."""
 
 BOT_COMMANDS = [
     ("accounts", "List Claude accounts"),
@@ -54,6 +59,8 @@ BOT_COMMANDS = [
     ("status", "What is running"),
     ("usage", "Usage of current session"),
     ("stop", "Stop the running job"),
+    ("notify", "Notifications from PC sessions on/off"),
+    ("reply", "Answer the last PC session that messaged you"),
     ("whoami", "Show your Telegram user id"),
     ("help", "Help"),
 ]
@@ -195,6 +202,47 @@ def resolve_bin(name):
     return find_claude(name) or name
 
 
+BOT_ENV_FLAG = "CLAUDE_TG_BOT"  # set for the bot's own Claude runs, so the hook skips them
+HOOK_SESSIONS_FILE = "hook_sessions.json"
+HOOK_SESSIONS_KEEP = 200
+
+
+def _read_json(path):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return {}
+
+
+def hook_session_remember(base, chat_id, message_id, info):
+    """Remember which Claude Code session a Telegram message belongs to."""
+    path = Path(base) / HOOK_SESSIONS_FILE
+    data = _read_json(path)
+    chat = data.setdefault(str(chat_id), {})
+    entry = dict(info, time=int(time.time()))
+    chat[str(message_id)] = entry
+    if len(chat) > HOOK_SESSIONS_KEEP:
+        for key in sorted(chat, key=lambda k: chat[k].get("time", 0))[:-HOOK_SESSIONS_KEEP]:
+            del chat[key]
+    data.setdefault("_last", {})[str(chat_id)] = entry
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    for _ in range(10):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.1)
+
+
+def hook_session_lookup(base, chat_id, message_id=None):
+    """The session a message belongs to (or the chat's latest one if message_id is None)."""
+    data = _read_json(Path(base) / HOOK_SESSIONS_FILE)
+    if message_id is None:
+        return data.get("_last", {}).get(str(chat_id))
+    return data.get(str(chat_id), {}).get(str(message_id))
+
+
 def account_env(acc):
     """Environment for running Claude Code as one configured account."""
     env = os.environ.copy()
@@ -276,7 +324,8 @@ class InstanceLock:
 
 class TelegramAPI:
     def __init__(self, token, poll_timeout=50):
-        self.base = f"https://api.telegram.org/bot{token}/"
+        api = os.environ.get("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/")
+        self.base = f"{api}/bot{token}/"
         self.poll_timeout = poll_timeout
 
     def call(self, method, **params):
@@ -293,12 +342,16 @@ class TelegramAPI:
                          allowed_updates=["message"])
 
     def send(self, chat_id, text):
+        """Send text (split if long). Returns the ids of the messages sent."""
+        ids = []
         for chunk in split_message(text):
             try:
-                self.call("sendMessage", chat_id=chat_id, text=chunk,
-                          disable_web_page_preview=True)
+                msg = self.call("sendMessage", chat_id=chat_id, text=chunk,
+                                disable_web_page_preview=True)
+                ids.append(msg.get("message_id"))
             except Exception as e:  # never let a send failure kill a worker
                 log.error("sendMessage to %s failed: %s", chat_id, e)
+        return ids
 
     def set_commands(self, commands):
         self.call("setMyCommands",
@@ -368,6 +421,7 @@ class Bot:
         self.claude_cmd = ([resolve_bin(claude_bin)] if isinstance(claude_bin, str)
                            else [resolve_bin(claude_bin[0])] + list(claude_bin[1:]))
         self.job_timeout = int(config.get("job_timeout_seconds", 3600))
+        self.base_dir = Path(state.path).resolve().parent
         self.jobs = {}  # chat_id -> job dict
         self.jobs_lock = threading.Lock()
 
@@ -420,12 +474,20 @@ class Bot:
                                        "allowed_usernames) in config.json.")
             return
 
+        reply_to = (msg.get("reply_to_message") or {}).get("message_id")
+        if cmd is None and reply_to:
+            target = hook_session_lookup(self.base_dir, chat_id, reply_to)
+            if target and target.get("session_id"):
+                self.start_job(chat_id, text, external=target)
+                return
+
         handlers = {
             "/start": self.cmd_help, "/help": self.cmd_help,
             "/accounts": self.cmd_accounts, "/link": self.cmd_link, "/use": self.cmd_link,
             "/new": self.cmd_new, "/continue": self.cmd_continue, "/resume": self.cmd_resume,
             "/sessions": self.cmd_sessions, "/status": self.cmd_status,
             "/usage": self.cmd_usage, "/stop": self.cmd_stop,
+            "/notify": self.cmd_notify, "/reply": self.cmd_reply,
         }
         if cmd is None:
             self.start_job(chat_id, text)
@@ -561,6 +623,24 @@ class Bot:
             msg += f"\nModels: {', '.join(s['models'])}"
         self.api.send(chat_id, msg)
 
+    def cmd_notify(self, chat_id, arg):
+        path = self.base_dir / "notify.json"
+        if arg.lower() in ("on", "off"):
+            path.write_text(json.dumps({"enabled": arg.lower() == "on"}), encoding="utf-8")
+        enabled = _read_json(path).get("enabled", True)
+        self.api.send(chat_id, "🔔 Messages from your Claude Code sessions on the PC are "
+                      + ("ON" if enabled else "OFF") + ". (/notify on or /notify off)")
+
+    def cmd_reply(self, chat_id, arg):
+        target = hook_session_lookup(self.base_dir, chat_id)
+        if not target:
+            self.api.send(chat_id, "No Claude Code session on the PC has messaged you yet.")
+            return
+        if not arg:
+            self.api.send(chat_id, "Usage: /reply <your answer>  (or just reply to the message)")
+            return
+        self.start_job(chat_id, arg, external=target)
+
     def cmd_stop(self, chat_id, arg):
         with self.jobs_lock:
             job = self.jobs.get(chat_id)
@@ -577,8 +657,26 @@ class Bot:
 
     # ----- jobs
 
-    def start_job(self, chat_id, prompt):
-        acc = self._account_or_warn(chat_id)
+    def account_for_config_dir(self, config_dir):
+        """The configured account that uses this Claude profile folder, if any."""
+        want = os.path.normcase(os.path.abspath(os.path.expanduser(config_dir))) if config_dir else None
+        for name, acc in self.accounts.items():
+            have = acc.get("config_dir")
+            have = os.path.normcase(os.path.abspath(os.path.expanduser(have))) if have else None
+            if have == want:
+                return name
+        return None
+
+    def start_job(self, chat_id, prompt, external=None):
+        """Run a prompt. `external` = a PC session to continue: {session_id, cwd, config_dir}."""
+        if external:
+            # The account that uses the session's Claude profile; otherwise the chat's (or the
+            # first) account's settings, run with the session's own profile (see build_command).
+            linked = self.state.chat(chat_id)["account"]
+            acc = (self.account_for_config_dir(external.get("config_dir"))
+                   or (linked if linked in self.accounts else next(iter(self.accounts))))
+        else:
+            acc = self._account_or_warn(chat_id)
         if not acc:
             return
         with self.jobs_lock:
@@ -586,15 +684,16 @@ class Bot:
                 self.api.send(chat_id, "⏳ Claude is still working in this chat. /status or /stop.")
                 return
             job = {"account": acc, "prompt": prompt, "started": time.time(), "proc": None,
-                   "stopped": False}
+                   "stopped": False, "external": external}
             self.jobs[chat_id] = job
         # Announce before starting, so a fast result can't arrive ahead of this message.
-        self.api.send(chat_id, f"⏳ Working on it ({acc})…")
+        where = f"session in {Path(external['cwd']).name}" if external and external.get("cwd") else acc
+        self.api.send(chat_id, f"⏳ Working on it ({where})…")
         t = threading.Thread(target=self._run_job, args=(chat_id, job), daemon=True)
         job["thread"] = t
         t.start()
 
-    def build_command(self, account, session_id):
+    def build_command(self, account, session_id, cwd=None, external=None):
         acc = self.accounts[account]
         cmd = self.claude_cmd + ["-p", "--output-format", "json"]
         if session_id:
@@ -606,14 +705,26 @@ class Bot:
         if acc.get("allowed_tools"):
             cmd += ["--allowedTools", ",".join(acc["allowed_tools"])]
         cmd += list(acc.get("extra_args", []))
-        cwd = os.path.expanduser(acc.get("workdir", "."))
-        return cmd, account_env(acc), cwd
+        cwd = cwd or os.path.expanduser(acc.get("workdir", "."))
+        env = account_env(acc)
+        if external is not None:  # a PC session: use the Claude profile it was started with
+            env.pop("CLAUDE_CONFIG_DIR", None)
+            if external.get("config_dir"):
+                env["CLAUDE_CONFIG_DIR"] = external["config_dir"]
+        env[BOT_ENV_FLAG] = "1"
+        return cmd, env, cwd
 
     def _run_job(self, chat_id, job):
         account = job["account"]
+        external = job.get("external")
         try:
-            session_id = self.state.session(chat_id, account)["session_id"]
-            cmd, env, cwd = self.build_command(account, session_id)
+            if external:
+                session_id = external["session_id"]
+                cmd, env, cwd = self.build_command(account, session_id, cwd=external.get("cwd"),
+                                                   external=external)
+            else:
+                session_id = self.state.session(chat_id, account)["session_id"]
+                cmd, env, cwd = self.build_command(account, session_id)
             log.info("chat %s / %s: running %s", chat_id, account, cmd)
             if not os.path.isdir(cwd):
                 self.api.send(chat_id, f"❌ The workdir for '{account}' doesn't exist: {cwd}")
@@ -647,7 +758,12 @@ class Bot:
                 hint = LOGIN_HINT if LOGIN_ERROR.search(tail) else ""
                 self.api.send(chat_id, f"❌ Claude exited with code {proc.returncode} ({account}).\n\n{tail}{hint}")
                 return
-            self._record(chat_id, account, result)
+            if external:
+                with self.state.lock:
+                    add_stats(self.state.account_stats(account), result)
+                    self.state.save()
+            else:
+                self._record(chat_id, account, result)
             icon = "❌" if result.get("is_error") else "✅"
             header = (f"{icon} {account} · {fmt_duration(elapsed)} · "
                       f"${float(result.get('total_cost_usd') or 0):.4f} · "
@@ -659,7 +775,14 @@ class Bot:
                     body = f"{body}{LOGIN_HINT}"
             else:
                 log.info("chat %s / %s: done in %s", chat_id, account, fmt_duration(elapsed))
-            self.api.send(chat_id, f"{header}\n\n{body}")
+            if external:
+                header += f" · {Path(cwd).name}"
+                body += "\n\n↩️ Reply to this message to continue this session."
+            ids = self.api.send(chat_id, f"{header}\n\n{body}") or []
+            if external:
+                follow = dict(external, session_id=result.get("session_id") or session_id)
+                for message_id in ids:
+                    hook_session_remember(self.base_dir, chat_id, message_id, follow)
         except Exception as e:
             log.exception("job failed")
             self.api.send(chat_id, f"❌ Bot error: {e}")

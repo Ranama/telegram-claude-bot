@@ -169,6 +169,7 @@ class SetupTest(unittest.TestCase):
         }), encoding="utf-8")
         with mock.patch.object(setup_bot, "ensure_claude", return_value=["C:/c/claude.exe"]), \
                 mock.patch.object(setup_bot, "ensure_signed_in"), \
+                mock.patch.object(setup_bot, "ensure_notifications") as notifications, \
                 mock.patch.object(setup_bot.getpass, "getpass", return_value=GOOD), \
                 mock.patch.object(setup_bot, "telegram_me", return_value={"username": "my_bot"}), \
                 mock.patch.object(setup_bot.bot, "start", return_value=0) as start:
@@ -180,6 +181,7 @@ class SetupTest(unittest.TestCase):
         runtime_cfg = start.call_args[0][1]
         self.assertEqual(runtime_cfg["claude_bin"], "C:/c/claude.exe")  # bot gets the full path
         self.assertIn("https://t.me/my_bot", self.out.getvalue())
+        notifications.assert_called_once()
 
     def test_main_reports_setup_errors(self):
         cfg_path = self.dir / "config.json"

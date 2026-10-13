@@ -4,6 +4,9 @@ state.json
 state.tmp
 config.tmp
 bot.lock
+hook_sessions.json
+hook_sessions.tmp
+notify.json
 *.log
 *.log.*
 
