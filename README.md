@@ -36,20 +36,28 @@ Then keep the bot running for `/status`: `python bot.py` (Windows: `start.bat`).
 
 ## What you get
 
-Messages look like this:
+Messages look like this (every one with its time):
 
 ```
+🟡 Started — VineTrip · “Login bug fix”
+👤 you@example.com
+Fix the login bug
+🕒 15 Oct 14:02:10
+
 ✅ Completed — VineTrip · “Login bug fix”
 👤 you@example.com
 Added the login page and wrote tests for it.
+🕒 15 Oct 14:10:42
 
 ❓ Needs input — VineTrip · “Login bug fix”
 👤 you@example.com
 Claude asks: Which database? (Postgres, SQLite)
+🕒 15 Oct 14:05:31
 
 🔐 Needs approval — shop · “Deploy script”
 👤 work@example.com
 Claude wants to run: npm run deploy
+🕒 15 Oct 14:21:07
 ```
 
 `/status` in Telegram lists all sessions of all your Claude accounts on the computer, most urgent first, with a 🔄 Refresh button:
@@ -61,15 +69,15 @@ Claude wants to run: npm run deploy
 
 🔴 Login bug fix
 Asks you: Which database? (Postgres, SQLite)
-📁 VineTrip · 2 min ago
+📁 VineTrip · started 14:02
 
 🟡 Deploy script
 Working on: Run the tests and deploy
-📁 shop · just now
+📁 shop · started 14:20 · last done 13:55
 
 🟢 Write a README for notes
 Done: I wrote README.md with setup steps.
-📁 Claude · 1 h ago
+📁 Claude · started 12:58 · done 13:04
 ```
 
 🔴 needs you (a question or an approval) · 🟡 working · 🟢 done · 🟠 no activity for 20+ min · ⚪ closed. Sessions are named by Claude Code's title, or by your first message cleaned up (file names instead of paths, no "can you please").
@@ -104,7 +112,7 @@ Claude Code [hooks](https://code.claude.com/docs/en/hooks) run `hook.py` on thes
 
 | Event | Lock file | State | Telegram |
 |---|---|---|---|
-| UserPromptSubmit (you send a command) | created | 🟡 working | — |
+| UserPromptSubmit (you send a command) | created | 🟡 working | 🟡 message |
 | PermissionRequest | | 🔴 needs input / approval | ❓ / 🔐 message |
 | Notification (input needed) | | 🔴 needs input | ❓ message |
 | Stop (Claude is done) | deleted | 🟢 completed | ✅ message |

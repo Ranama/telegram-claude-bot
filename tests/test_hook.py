@@ -20,14 +20,24 @@ class HookTest(TempDirTest):
         return hook.handle(event, base=self.dir, cfg=cfg or self.cfg, send=self.tg.send)
 
     def texts(self):
-        return [m["text"] for m in self.tg.sent]
+        """Message texts without the 🕒 time line (checked separately)."""
+        for m in self.tg.sent:
+            self.assertRegex(m["text"], r"\n🕒 \d\d \w{3} \d\d:\d\d:\d\d$")
+        return [m["text"].rsplit("\n🕒 ", 1)[0] for m in self.tg.sent]
 
     def test_completed(self):
         self.run_hook("UserPromptSubmit", prompt="fix the login bug", session_title="Login bug fix")
-        self.assertEqual(self.tg.sent, [])                    # starting sends nothing
         self.assertEqual(self.run_hook("Stop", last_assistant_message="Done. I fixed the bug and added a test."), 1)
-        self.assertEqual(self.texts(), ["✅ Completed — VineTrip · “Login bug fix”\n👤 jeppe@example.com\n"
+        self.assertEqual(self.texts(), ["🟡 Started — VineTrip · “Login bug fix”\n👤 jeppe@example.com\n"
+                                        "fix the login bug",
+                                        "✅ Completed — VineTrip · “Login bug fix”\n👤 jeppe@example.com\n"
                                         "Done. I fixed the bug and added a test."])
+
+    def test_late_start_sends_nothing(self):
+        import time
+        status.record_event(self.dir, {"hook_event_name": "Stop", "session_id": "s1", "cwd": "/x/VineTrip"},
+                            now=time.time() + 60)
+        self.assertEqual(self.run_hook("UserPromptSubmit", prompt="x"), 0)
 
     def test_needs_input_and_approval(self):
         self.run_hook("PermissionRequest", tool_name="AskUserQuestion", tool_input={"questions": [

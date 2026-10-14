@@ -84,6 +84,25 @@ def folder_name(path):
     return parts[-1] or str(path or "?") or "?"
 
 
+def clock(ts, now=None):
+    """'14:02' today, '13 Oct 14:02' on other days (this computer's time)."""
+    t, today = time.localtime(ts), time.localtime(now or time.time())
+    return time.strftime("%H:%M" if t[:3] == today[:3] else "%d %b %H:%M", t)
+
+
+def when(value):
+    """Unix seconds from a number or an ISO date ('2026-10-15T01:57:00+02:00'); 0 if unknown."""
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        pass
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
 def ago(seconds):
     seconds = max(0, int(seconds))
     if seconds < 60:
@@ -341,7 +360,14 @@ def current(base, now=None, hours=LIST_HOURS):
         text = {key: one_line(rec.get(key), 300) for key in
                 ("project", "account", "title", "task", "detail", "summary", "where")}
         text["title"] = text["title"] or readable_title(text["task"]) or "Untitled session"
+        started, finished = (t if 0 < t <= now + 60 else 0 for t in
+                             (when(rec.get("started")), when(rec.get("completed_at"))))
+        if state in ("working", "stalled") and not started:
+            started = activity                     # a cloud session that didn't say: its file's time
+        if state == "completed" and not finished:
+            finished = activity
         items.append(dict(text, state=state, order=STATES[state][2], activity=activity,
+                          started=started, finished=finished,
                           ago=ago(now - activity), session_id=rec["session_id"]))
     items.sort(key=lambda i: (i["order"], -i["activity"]))
     return items
@@ -373,6 +399,15 @@ def _what(item):
     return "Session closed"
 
 
+def _times(item, now=None):
+    """'started 14:02 · done 14:10' (or 'last done' while a newer task runs)."""
+    out = [f"started {clock(item['started'], now)}"] if item.get("started") else []
+    if item.get("finished"):
+        done = "done" if item["state"] in ("completed", "ended") else "last done"
+        out.append(f"{done} {clock(item['finished'], now)}")
+    return out or [item.get("ago") or ""]
+
+
 def status_text(items, limit=15, now=None):
     """The /status message (Telegram HTML): a coloured line per session, most urgent first."""
     esc = lambda t: html.escape(str(t), quote=False)  # noqa: E731
@@ -393,7 +428,7 @@ def status_text(items, limit=15, now=None):
         lines += ["",
                   f"{COLORS.get(item['state'], '⚪')} <b>{esc(one_line(item['title'], 60))}</b>",
                   esc(one_line(_what(item), 120)),
-                  f"<i>{' · '.join(where + [item['ago']])}</i>"]
+                  f"<i>{' · '.join(where + _times(item, now))}</i>"]
     if len(items) > limit:
         lines += ["", f"… and {len(items) - limit} more"]
     lines += ["", f"🕒 Updated {clock}"]

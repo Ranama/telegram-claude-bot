@@ -22,7 +22,7 @@ class BotTest(TempDirTest):
         self.msg("/status")
         sent = self.tg.sent[-1]
         self.assertIn("🟡 <b>Deploy it</b>", sent["text"])
-        self.assertIn("<i>📁 VineTrip · just now</i>", sent["text"])
+        self.assertRegex(sent["text"], r"<i>📁 VineTrip · started \d\d:\d\d</i>")
         self.assertEqual((sent["buttons"], sent["parse_mode"]), (bot.REFRESH, "HTML"))
         self.bot.handle({"update_id": 2, "callback_query": {"id": "c1", "data": "status",
                          "message": {"message_id": 5, "chat": {"id": CHAT}}}})
@@ -47,7 +47,7 @@ class BotTest(TempDirTest):
         old = time.time() - 10
         os.utime(box / "a.txt", (old, old))
         self.assertEqual(self.bot.deliver_outbox(), 1)
-        self.assertEqual(self.tg.sent[-1]["text"], "✅ Backup finished")
+        self.assertRegex(self.tg.sent[-1]["text"], r"^✅ Backup finished\n🕒 \d\d \w{3} \d\d:\d\d:\d\d$")
         self.assertEqual([p.name for p in box.iterdir()], ["new.txt"])
 
     def test_single_instance(self):

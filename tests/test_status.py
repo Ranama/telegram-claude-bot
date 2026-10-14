@@ -82,10 +82,12 @@ class StatusTest(TempDirTest):
                           "cloud-d": "needs_input"})
         text = status.status_text(list(items.values()))
         self.assertIn("🟡 <b>Telegram notifier</b>\nWorking on: Make /status list running sessions\n"
-                      "<i>📁 telegram-claude-bot · ☁️ cloud · just now</i>", text)
+                      "<i>📁 telegram-claude-bot · ☁️ cloud · started " + status.clock(time.time()) + "</i>", text)
         self.assertIn("🟠 <b>Old chat</b>", text)
-        self.assertIn("🟢 <b>Shop</b>\nDone: Deployed.\n<i>just now</i>", text)  # ms → file time
+        self.assertIn("🟢 <b>Shop</b>\nDone: Deployed.\n<i>done " + status.clock(time.time()) + "</i>", text)
         self.assertIn("🔴 <b>Question</b>\nNeeds your input: Which colour?\n<i>3 d ago</i>", text)
+        self.assertEqual(status.when("2026-10-15T01:57:00+02:00"), 1792022220.0)
+        self.assertEqual((status.when("1792022220"), status.when("soon"), status.when(None)), (1792022220.0, 0, 0))
         self.assertIn("👤 me@x.com", text)
 
     def test_leftover_lock_is_cleaned_and_stalled_lock_shown(self):
@@ -119,8 +121,11 @@ class StatusTest(TempDirTest):
         text = status.status_text(items, now=t)
         self.assertTrue(text.startswith("📋 <b>Claude sessions</b>\n👤 jeppe@example.com\n"
                                         "🟡 1 working · 🟢 1 done\n"), text)
-        self.assertIn("🟡 <b>Deploy</b>\nWorking on it…\n<i>📁 shop · just now</i>", text)
-        self.assertIn("🟢 <b>Login bug fix</b>\nDone: All done here.\n<i>📁 VineTrip · just now</i>", text)
+        self.assertIn("🟡 <b>Deploy</b>\nWorking on it…\n<i>📁 shop · started " + status.clock(t) + "</i>", text)
+        self.assertIn("🟢 <b>Login bug fix</b>\nDone: All done here.\n<i>📁 VineTrip · done " + status.clock(t) + "</i>", text)
+        self.assertEqual(status._times({"state": "working", "started": t, "finished": t - 60}, t),
+                         [f"started {status.clock(t)}", f"last done {status.clock(t - 60)}"])
+        self.assertEqual(status.clock(t - 3 * 86400, t), time.strftime("%d %b %H:%M", time.localtime(t - 3 * 86400)))
         self.assertIn("🕒 Updated ", text)
         self.assertIn("No sessions in the last 24 hours.", status.status_text([]))
 

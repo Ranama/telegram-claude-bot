@@ -1,8 +1,8 @@
 # Claude → Telegram notifications
 
 This repo makes every Claude Code session on this computer message the user on Telegram:
-✅ when a task is done (one-line summary), ❓ when Claude needs input, 🔐 when it needs
-approval — each with the session (folder + title) and the Claude account. It also keeps a
+🟡 when a task starts, ✅ when it's done (one-line summary), ❓ when Claude needs input, 🔐 when it needs
+approval — each with the session (folder + title), the Claude account and the time. It also keeps a
 status file per session (`status/sessions/<id>.json`), which `/status` in Telegram lists:
 🔴 needs you, 🟡 working, 🟢 done.
 
@@ -42,19 +42,22 @@ time — never delete it:
     {"session_id": "<id>", "where": "cloud", "title": "<short name of this conversation>",
      "project": "<repo or folder you work in>", "account": "<the user's Claude account email>",
      "state": "working", "task": "<what you're doing right now, one line>",
-     "detail": "", "summary": ""}
+     "started": <unix seconds>, "completed_at": <unix seconds>, "detail": "", "summary": ""}
 
-- When you start a task: `"state": "working"` and the `task`.
+- When you start a task: `"state": "working"`, the `task` and `started` (now, e.g. `date +%s`);
+  keep the previous `completed_at`.
 - When you need the user: `"state": "needs_input"` (or `"needs_approval"`), the question in `detail`.
-- When you're done: `"state": "completed"` and one short line in `summary`.
+- When you're done: `"state": "completed"`, one short line in `summary` and `completed_at` (now).
 
-A `working` file that hasn't changed for 20 minutes shows as 🟠 inactive. When you're done or
-need the user, also write a text file to `outbox/` here; the running bot sends it to Telegram
-and deletes it. Use this format:
+/status shows "started 14:02 · done 14:10" from these (or the file's time if they're missing).
 
-    ✅ Completed — <project> · “<title>”      (or ❓ Needs input — …)
+A `working` file that hasn't changed for 20 minutes shows as 🟠 inactive. When you start a task,
+are done, or need the user, also write a text file to `outbox/` here (a new file name each time);
+the running bot sends it to Telegram, adds the time, and deletes it. Use this format:
+
+    🟡 Started — <project> · “<title>”      (or ✅ Completed — …, ❓ Needs input — …)
     👤 <account>
-    <one short line>
+    <one short line: the task, the result, or the question>
 
 ## Files
 

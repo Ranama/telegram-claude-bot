@@ -71,6 +71,8 @@ class Bot:
                 if (now or time.time()) - path.stat().st_mtime < 2:
                     continue  # still being written
                 text = path.read_text(encoding="utf-8-sig", errors="replace").strip()
+                if text and "🕒" not in text:       # when it was written
+                    text += "\n🕒 " + time.strftime("%d %b %H:%M:%S", time.localtime(path.stat().st_mtime))
                 if text:
                     self.send(self.cfg, text)
                     sent += 1
